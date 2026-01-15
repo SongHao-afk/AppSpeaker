@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'loopback.dart';
+import 'background_service.dart';
 
 class Homepage extends StatefulWidget {
   const Homepage({super.key});
@@ -44,14 +46,23 @@ class _HomepageState extends State<Homepage> {
   bool wiredPresent = false; // đang cắm tai nghe dây/USB?
   bool preferWiredMic = false; // switch: dùng mic tai nghe
   Timer? _wiredPoll; // poll enable/disable switch
-
   // ✅ ADDED: boost cho mic tai nghe (vì thường rất nhỏ)
   double headsetBoost = 2.2;
   // =================================================================
 
+  // ✅ ADDED: Callback for notification button
+  void _onReceiveTaskData(dynamic data) {
+    if (data == 'stop' && running) {
+      _stop();
+    }
+  }
+
   @override
   void initState() {
     super.initState();
+
+    // ✅ Listen for notification button events
+    FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
 
     // ✅ ADDED: poll xem có cắm wired không để enable/disable switch
     _wiredPoll = Timer.periodic(const Duration(milliseconds: 500), (_) async {
@@ -77,14 +88,15 @@ class _HomepageState extends State<Homepage> {
       } catch (_) {}
     });
   }
-
   @override
   void dispose() {
     _wiredPoll?.cancel(); // ✅ ADDED
     _paramDebounce?.cancel();
     _rmsSub?.cancel();
+    FlutterForegroundTask.removeTaskDataCallback(_onReceiveTaskData);
     if (running) {
       Loopback.stop();
+      BackgroundService.stop();
     }
     super.dispose();
   }
@@ -110,12 +122,11 @@ class _HomepageState extends State<Homepage> {
 
   Future<void> _start() async {
     if (_starting || running) return;
-    _starting = true;
-
-    try {
+    _starting = true;    try {
       final statuses = await [
         Permission.microphone,
         Permission.bluetoothConnect, // Android 12+ (ignore nếu thấp hơn)
+        Permission.notification, // Android 13+ for foreground notification
       ].request();
 
       final micGranted = statuses[Permission.microphone]?.isGranted ?? false;
@@ -135,6 +146,9 @@ class _HomepageState extends State<Homepage> {
           headsetBoost: headsetBoost,
         );
       } catch (_) {}
+
+      // Start foreground service
+      await BackgroundService.start();
 
       await Loopback.start(voiceMode: voiceMode);
       await _pushParams();
@@ -156,13 +170,15 @@ class _HomepageState extends State<Homepage> {
       _starting = false;
     }
   }
-
   Future<void> _stop() async {
     try {
       await Loopback.stop();
     } catch (_) {}
     await _rmsSub?.cancel();
     _rmsSub = null;
+
+    // Stop foreground service
+    await BackgroundService.stop();
 
     if (mounted) {
       setState(() {
@@ -245,12 +261,36 @@ class _HomepageState extends State<Homepage> {
                     ),
                   ),
                 ),
-              ),
-              const SizedBox(height: 8),
+              ),              const SizedBox(height: 8),
               Text(
                 'Âm lượng: $level%',
                 style: const TextStyle(color: Colors.white70),
               ),
+              
+              // Service status indicator
+              if (running) ...[
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.green.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: Colors.greenAccent),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.check_circle, color: Colors.greenAccent, size: 16),
+                      SizedBox(width: 8),
+                      Text(
+                        '🔊 Đang chạy nền - Có thể chuyển sang app khác',
+                        style: TextStyle(color: Colors.greenAccent, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              
               const SizedBox(height: 18),
 
               Container(

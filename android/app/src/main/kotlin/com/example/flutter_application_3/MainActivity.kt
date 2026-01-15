@@ -392,22 +392,24 @@ class MainActivity : FlutterActivity() {
     // ✅ ADDED: đang thật sự dùng mic tai nghe?
     val usingWiredMic = (wiredIn != null && preferWiredMic)
 
-    val wiredPresent = (!voicePath) && (wiredOut != null || wiredIn != null)
-
-    // ===== PATCH: buffer non-voicePath tăng cho wired để tránh underrun -> hết sạn =====
-    val isWiredOutNow = (!voicePath) && (wiredOut != null)
-
-    // Use separate buffers for recorder/player so we can target lower playback latency for SCO
-    val recTarget = if (voicePath) (effectiveSampleRate / 100) else (effectiveSampleRate / 50)
-
-    val playTarget = when {
-      voicePath -> (effectiveSampleRate / 100)
-      isWiredOutNow -> (effectiveSampleRate / 20) // ✅ PATCH: wired mượt hơn
-      else -> (effectiveSampleRate / 40)          // ✅ PATCH: media thường tăng nhẹ
+    val wiredPresent = (!voicePath) && (wiredOut != null || wiredIn != null)    // ===== PATCH: buffer non-voicePath tăng cho wired để tránh underrun -> hết sạn =====
+    val isWiredOutNow = (!voicePath) && (wiredOut != null)    // ✅ FIX v2: Tăng buffer SIZE RẤT LỚN để tránh underrun khi nói câu dài
+    // Mục tiêu: buffer đủ lớn để chứa ~200-300ms audio cho wired (tránh ngắt quãng)
+    val recTarget = if (voicePath) {
+      (effectiveSampleRate / 50)  // Voice: 20ms chunk
+    } else {
+      (effectiveSampleRate / 20)   // ✅ FIX v2: tăng lên /20 (50ms chunk cho wired/media)
     }
 
-    val recBufSize = maxOf(recMin, recTarget)
-    val playBufSize = maxOf(playMin, playTarget)
+    val playTarget = when {
+      voicePath -> (effectiveSampleRate / 50)       // Voice: 20ms
+      isWiredOutNow -> (effectiveSampleRate / 10)   // ✅ FIX v2: wired tăng lên /10 (100ms chunk)
+      else -> (effectiveSampleRate / 20)            // Media: 50ms
+    }
+
+    // ✅ FIX v2: Nhân buffer x6 thay vì x3 để có buffer dự trữ LỚN (tránh underrun triệt để)
+    val recBufSize = maxOf(recMin, recTarget * 6)
+    val playBufSize = maxOf(playMin, playTarget * 6)
 
     Log.d(
       TAG,
@@ -499,8 +501,7 @@ class MainActivity : FlutterActivity() {
       .setAudioFormat(format)
       .setTransferMode(AudioTrack.MODE_STREAM)
       .setBufferSizeInBytes(playBufSize)
-      .apply {
-        if (Build.VERSION.SDK_INT >= 29) {
+      .apply {        if (Build.VERSION.SDK_INT >= 29) {
           try {
             val perfField = AudioTrack::class.java.getField("PERFORMANCE_MODE_LOW_LATENCY")
             val perfMode = perfField.getInt(null)
@@ -512,21 +513,25 @@ class MainActivity : FlutterActivity() {
       .build()
 
     try { Log.d(TAG, "preferred output: " + (player?.preferredDevice?.type ?: "none")) } catch (_: Exception) {}
-
+    
     // ✅ Ép route đúng theo voicePath
     routeToWiredIfPresent(recorder, player, wiredPresent, voicePath)
-
+    
     try { player?.setVolume(1.0f) } catch (_: Exception) {}
 
     val eq = Eq5Band(effectiveSampleRate.toDouble())
 
     running = true
     thread = Thread {
-      Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
-
+      // ✅ FIX: Tăng priority cao nhất cho audio thread để tránh bị gián đoạn
+      Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+      
       val rec = recorder ?: return@Thread
       val out = player ?: return@Thread
-      val buf = ShortArray(min(recBufSize, playBufSize) / 2)
+      
+      // ✅ FIX v2: Tăng chunk size để giảm overhead (chunk lớn hơn = ít lần write hơn = mượt hơn)
+      val chunkSize = min(recBufSize, playBufSize) / 3  // ✅ FIX v2: tăng từ /4 -> /3 (chunk lớn hơn)
+      val buf = ShortArray(chunkSize)
 
       var lastEqEnabled = eqEnabled
       var lastGain = outputGain
@@ -556,15 +561,26 @@ class MainActivity : FlutterActivity() {
       var lastMeterTs = 0L
 
       // ===== PATCH: log underrunCount để bắt bệnh wired "sạn" =====
-      var lastUnderrunTs = 0L
-
-      // ================== ✅ ADDED: anti-feedback guard state ==================
+      var lastUnderrunTs = 0L      // ================== ✅ ADDED: anti-feedback guard state ==================
       var guardGain = 1.0
       var lastRms = 0.0
       var lastGuardLogTs = 0L
       // ========================================================================
 
       rec.startRecording()
+      
+      // ✅ FIX v2: PRE-BUFFERING - nạp đầy buffer trước khi play để tránh underrun ngay từ đầu
+      // Điền 1-2 chunk silence vào AudioTrack trước khi play để có "đệm" chống gaps
+      val preBufChunks = 2  // 2 chunks silence = ~200ms @ 48kHz với /3 chunk
+      val silenceBuf = ShortArray(chunkSize) { 0 }
+      for (i in 0 until preBufChunks) {
+        try {
+          out.write(silenceBuf, 0, silenceBuf.size, AudioTrack.WRITE_BLOCKING)
+        } catch (_: Exception) {
+          break
+        }      }
+      Log.d(TAG, "Pre-buffered $preBufChunks chunks of silence to prevent initial underrun")
+      
       out.play()
 
       while (running) {
@@ -572,7 +588,7 @@ class MainActivity : FlutterActivity() {
         if (n <= 0) continue
 
         refreshEqIfChanged()
-
+        
         val en = lastEqEnabled
         val gRaw = lastGain
 
@@ -583,6 +599,9 @@ class MainActivity : FlutterActivity() {
         val g = if (isA2dpOutNow) min(gRaw, A2DP_SAFE_GAIN_CAP) else gRaw
         // ====================================================================================
 
+        // ✅ FIX v2: PRE-CALCULATE combined gain để giảm phép tính trong loop
+        val combinedGain = g * guardGain * micBoost
+        
         var sumSq = 0.0
 
         if (en) {
@@ -593,11 +612,8 @@ class MainActivity : FlutterActivity() {
             // ✅ FIX: chặn NaN/Infinity ngay sau EQ
             if (!x.isFinite()) x = 0.0
 
-            x *= micBoost          // ✅ ADDED
-
-            // ================== ✅ ADDED: apply feedback guard gain ==================
-            x *= g * guardGain
-            // =======================================================================
+            // ✅ FIX v2: Áp dụng combined gain 1 lần thay vì 3 lần nhân
+            x *= combinedGain
 
             x = softClip(x)
 
@@ -609,11 +625,9 @@ class MainActivity : FlutterActivity() {
         } else {
           for (i in 0 until n) {
             var x = buf[i].toDouble() / 32768.0
-            x *= micBoost          // ✅ ADDED
-
-            // ================== ✅ ADDED: apply feedback guard gain ==================
-            x *= g * guardGain
-            // =======================================================================
+            
+            // ✅ FIX v2: Áp dụng combined gain 1 lần
+            x *= combinedGain
 
             x = softClip(x)
 
@@ -639,9 +653,7 @@ class MainActivity : FlutterActivity() {
           } else {
             // hồi phục chậm
             guardGain += (1.0 - guardGain) * 0.002
-          }
-
-          // ✅ Noise Gate / Duck (half-duplex nhẹ): phá vòng lặp bằng cách mute cực ngắn
+          }          // ✅ Noise Gate / Duck (half-duplex nhẹ): phá vòng lặp bằng cách mute cực ngắn
           if (rmsNow > A2DP_HARD_MUTE_RMS) {
             val muteSamples = min(n, (effectiveSampleRate * (A2DP_MUTE_MS / 1000.0)).toInt().coerceAtLeast(1))
             for (i in 0 until muteSamples) buf[i] = 0
@@ -655,11 +667,35 @@ class MainActivity : FlutterActivity() {
         }
 
         lastRms = rmsNow
-        // =============================================================================================
-
-        val wrote = out.write(buf, 0, n)
-        if (wrote < 0) Log.w(TAG, "AudioTrack write error $wrote")
-        else if (wrote < n) Log.d(TAG, "AudioTrack partial write $wrote/$n")
+        // =============================================================================================        // ✅ FIX v2: Ghi dữ liệu với BLOCKING để đảm bảo KHÔNG BỎ MẤT samples
+        // Trade-off: có thể tăng latency nhẹ, nhưng âm thanh liên tục không bị đứt
+        var offset = 0
+        var remaining = n
+        
+        while (remaining > 0 && running) {
+          val wrote = if (Build.VERSION.SDK_INT >= 21) {
+            // ✅ FIX v2: dùng WRITE_BLOCKING để chờ buffer có chỗ thay vì drop
+            out.write(buf, offset, remaining, AudioTrack.WRITE_BLOCKING)
+          } else {
+            out.write(buf, offset, remaining)
+          }
+          
+          if (wrote < 0) {
+            Log.w(TAG, "AudioTrack write error $wrote")
+            break
+          } else if (wrote > 0) {
+            offset += wrote
+            remaining -= wrote
+          } else {
+            // wrote == 0, retry sau 1ms (không nên xảy ra với BLOCKING)
+            try { Thread.sleep(1) } catch (_: Exception) {}
+          }
+        }
+        
+        // ✅ FIX v2: Không còn drop samples - tất cả đều được ghi
+        if (remaining > 0 && running) {
+          Log.w(TAG, "⚠️ AudioTrack write incomplete: $remaining samples remaining")
+        }
 
         // ✅ PATCH: underrunCount (API24+). Nếu tăng liên tục => buffer chưa đủ.
         val now2 = System.currentTimeMillis()
