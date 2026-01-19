@@ -50,6 +50,11 @@ class _HomepageState extends State<Homepage> {
   double headsetBoost = 2.2;
   // =================================================================
 
+  // ================== ✅ ADDED: BT headset presence for enabling voiceMode ==================
+  bool btHeadsetPresent = false; // có tai nghe BT có mic không?
+  Timer? _btPoll; // poll enable/disable voiceMode switch
+  // =================================================================
+
   // ✅ ADDED: Callback for notification button
   void _onReceiveTaskData(dynamic data) {
     if (data == 'stop' && running) {
@@ -87,10 +92,30 @@ class _HomepageState extends State<Homepage> {
         }
       } catch (_) {}
     });
+
+    // ================== ✅ ADDED: poll xem có tai nghe BT có mic không để enable voiceMode ==================
+    _btPoll = Timer.periodic(const Duration(milliseconds: 500), (_) async {
+      try {
+        final v = await Loopback.isBtHeadsetPresent();
+        if (!mounted) return;
+
+        if (v != btHeadsetPresent) {
+          setState(() => btHeadsetPresent = v);
+
+          // nếu tai nghe BT bị ngắt mà đang bật voiceMode -> tự tắt để khỏi "kẹt"
+          if (!v && voiceMode) {
+            setState(() => voiceMode = false);
+          }
+        }
+      } catch (_) {}
+    });
+    // =======================================================================================================
   }
+
   @override
   void dispose() {
     _wiredPoll?.cancel(); // ✅ ADDED
+    _btPoll?.cancel(); // ✅ ADDED
     _paramDebounce?.cancel();
     _rmsSub?.cancel();
     FlutterForegroundTask.removeTaskDataCallback(_onReceiveTaskData);
@@ -122,7 +147,8 @@ class _HomepageState extends State<Homepage> {
 
   Future<void> _start() async {
     if (_starting || running) return;
-    _starting = true;    try {
+    _starting = true;
+    try {
       final statuses = await [
         Permission.microphone,
         Permission.bluetoothConnect, // Android 12+ (ignore nếu thấp hơn)
@@ -170,6 +196,7 @@ class _HomepageState extends State<Homepage> {
       _starting = false;
     }
   }
+
   Future<void> _stop() async {
     try {
       await Loopback.stop();
@@ -261,17 +288,21 @@ class _HomepageState extends State<Homepage> {
                     ),
                   ),
                 ),
-              ),              const SizedBox(height: 8),
+              ),
+              const SizedBox(height: 8),
               Text(
                 'Âm lượng: $level%',
                 style: const TextStyle(color: Colors.white70),
               ),
-              
+
               // Service status indicator
               if (running) ...[
                 const SizedBox(height: 12),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.green.withOpacity(0.2),
                     borderRadius: BorderRadius.circular(20),
@@ -280,17 +311,24 @@ class _HomepageState extends State<Homepage> {
                   child: const Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.check_circle, color: Colors.greenAccent, size: 16),
+                      Icon(
+                        Icons.check_circle,
+                        color: Colors.greenAccent,
+                        size: 16,
+                      ),
                       SizedBox(width: 8),
                       Text(
                         '🔊 Đang chạy nền - Có thể chuyển sang app khác',
-                        style: TextStyle(color: Colors.greenAccent, fontSize: 12),
+                        style: TextStyle(
+                          color: Colors.greenAccent,
+                          fontSize: 12,
+                        ),
                       ),
                     ],
                   ),
                 ),
               ],
-              
+
               const SizedBox(height: 18),
 
               Container(
@@ -314,16 +352,18 @@ class _HomepageState extends State<Homepage> {
                         Switch(
                           value: voiceMode,
                           activeColor: Colors.greenAccent,
-                          onChanged: running
+                          onChanged: (running || !btHeadsetPresent)
                               ? null
                               : (v) => setState(() => voiceMode = v),
                         ),
                       ],
                     ),
                     Text(
-                      voiceMode
-                          ? '✅ SCO realtime (tai nghe BT). Loa BT có thể fail.'
-                          : '✅ A2DP auto-route (loa BT ổn định, quality tốt hơn)',
+                      !btHeadsetPresent
+                          ? '⚠️ Chỉ bật được khi có tai nghe Bluetooth (có mic/SCO). Loa Bluetooth (A2DP) không bật được.'
+                          : (voiceMode
+                                ? '✅ SCO realtime (tai nghe BT). Loa BT có thể fail.'
+                                : '✅ A2DP auto-route (loa BT ổn định, quality tốt hơn)'),
                       style: const TextStyle(
                         color: Colors.white38,
                         fontSize: 12,

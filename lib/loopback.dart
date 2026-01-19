@@ -49,6 +49,13 @@ class Loopback {
     return v == true;
   }
 
+  // ================== ✅ ADDED: hỏi native xem có tai nghe BT (có mic) không ==================
+  static Future<bool> isBtHeadsetPresent() async {
+    final v = await _ch.invokeMethod('isBtHeadsetPresent');
+    return v == true;
+  }
+  // ==========================================================================================
+
   static Stream<double> rmsStream() {
     _rmsStream ??= _ev.receiveBroadcastStream().map(
       (e) => (e is num) ? e.toDouble() : 0.0,

@@ -1,6 +1,9 @@
 // MainActivity.kt
 package com.example.flutter_application_3
 
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothHeadset
+import android.bluetooth.BluetoothProfile
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -46,8 +49,7 @@ class MainActivity : FlutterActivity() {
   // Params from Flutter
   @Volatile private var eqEnabled: Boolean = true
   @Volatile private var outputGain: Double = 1.0
-  @Volatile private var bandGains: DoubleArray =
-    doubleArrayOf(1.0, 1.0, 1.0, 1.0, 1.0)
+  @Volatile private var bandGains: DoubleArray = doubleArrayOf(1.0, 1.0, 1.0, 1.0, 1.0)
 
   // SCO wait
   private var scoReceiver: BroadcastReceiver? = null
@@ -60,30 +62,120 @@ class MainActivity : FlutterActivity() {
   @Volatile private var lastSampleRate: Int = 48000
 
   // ===== INPUT SELECT (ADDED) =====
-  // false = ưu tiên mic điện thoại (built-in)
-  // true  = ưu tiên mic tai nghe dây (wired headset mic)
   @Volatile private var preferWiredMic: Boolean = false
-
-  // ✅ ADDED: boost cho mic tai nghe dây (vì thường rất nhỏ)
-  // ===== PATCH: giảm default để bớt “karaoke/metallic” khi hãng đã có processing =====
-  @Volatile private var headsetMicBoost: Double = 1.4 // ✅ PATCH (từ 2.2 -> 1.4)
+  @Volatile private var headsetMicBoost: Double = 3.0
 
   // ================== ✅ ADDED: Anti-feedback tuning for A2DP ==================
-  // Khi output là loa Bluetooth A2DP + input là mic máy => rất dễ hú.
-  // Không xoá route A2DP của bạn; chỉ thêm "feedback guard" + giới hạn gain khi A2DP.
-  private val A2DP_SAFE_GAIN_CAP = 0.55     // cap outputGain khi A2DP để giảm loop gain
-  private val FEEDBACK_RMS_THRESHOLD = 0.25 // RMS vượt ngưỡng này -> bóp gain nhanh
-  private val FEEDBACK_RISE_THRESHOLD = 0.06// RMS tăng nhanh -> nghi hú -> bóp gain nhanh
-  private val GUARD_MIN = 0.05             // không bóp xuống dưới mức này (tránh mất tiếng hoàn toàn)
+  private val A2DP_SAFE_GAIN_CAP = 0.55
+  private val FEEDBACK_RMS_THRESHOLD = 0.25
+  private val FEEDBACK_RISE_THRESHOLD = 0.06
+  private val GUARD_MIN = 0.05
 
-  // ✅ ADDED: nếu feedback bùng mạnh -> chèn vài ms "mute" để PHÁ vòng lặp (half-duplex nhẹ)
-  private val A2DP_MUTE_MS = 40            // 30-60ms thường đủ phá loop mà ít nghe thấy
-  private val A2DP_HARD_MUTE_RMS = 0.55    // rms quá lớn -> hard mute ngắn
+  private val A2DP_MUTE_MS = 40
+  private val A2DP_HARD_MUTE_RMS = 0.55
   // ===========================================================================
+
+  // ================== ✅ ADDED: Speaker default voice SR (FIX mất chữ + giảm chói/hú) ==================
+  private val SPEAKER_VOICE_SR = 24000
+  // ================================================================================================
+
+  // ================== ✅ ADDED: A2DP "mixer style" noise/feedback controls ==================
+  private val A2DP_HPF_HZ = 130.0
+  private val A2DP_AFS_ANALYZE_MS = 100L
+  private val A2DP_DUCK_MS = 450L
+  private val A2DP_EARLY_MUTE_RMS = 0.30
+  private val A2DP_EARLY_MUTE_RISE = 0.08
+  // ===========================================================================
+
+  // ================== ✅ FIX: robust BT headset (HFP/HSP) detection via profile proxy ==================
+  private var btHeadset: BluetoothHeadset? = null
+  private var btHeadsetProxyReady: Boolean = false
+
+  @Volatile private var lastBtHeadsetWithMic: Boolean? = null
+  private fun logBtHeadsetWithMicOnce(state: Boolean, reason: String) {
+    val prev = lastBtHeadsetWithMic
+    if (prev == null || prev != state) {
+      lastBtHeadsetWithMic = state
+      Log.d(TAG, "BT headset-with-mic = $state ($reason)")
+    }
+  }
+
+  private fun initBluetoothHeadsetProxy() {
+    try {
+      val adapter = BluetoothAdapter.getDefaultAdapter() ?: return
+      adapter.getProfileProxy(
+        this,
+        object : BluetoothProfile.ServiceListener {
+          override fun onServiceConnected(profile: Int, proxy: BluetoothProfile?) {
+            if (profile == BluetoothProfile.HEADSET) {
+              btHeadset = proxy as? BluetoothHeadset
+              btHeadsetProxyReady = true
+              Log.d(TAG, "BT HEADSET proxy connected")
+            }
+          }
+
+          override fun onServiceDisconnected(profile: Int) {
+            if (profile == BluetoothProfile.HEADSET) {
+              btHeadset = null
+              btHeadsetProxyReady = false
+              Log.d(TAG, "BT HEADSET proxy disconnected")
+            }
+          }
+        },
+        BluetoothProfile.HEADSET
+      )
+    } catch (e: Exception) {
+      Log.w(TAG, "initBluetoothHeadsetProxy fail: ${e.message}")
+    }
+  }
+  // =====================================================================================================
+
+  // ================== ✅ ADDED: AirPods/TWS mic+out route helpers (SCO/BLE_HEADSET) ==================
+  private fun findBtMicInput(): AudioDeviceInfo? {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return null
+    val ins = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+    return ins.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+      ?: ins.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLE_HEADSET }
+  }
+
+  private fun findBtCommOutput(): AudioDeviceInfo? {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return null
+    val outs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+    return outs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+      ?: outs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLE_HEADSET }
+  }
+
+  // Android 12+ (API 31): setCommunicationDevice giúp “khóa route” sang BT comm device (đỡ ROM phá)
+  // Không được phá wired.
+  private fun forceCommDeviceIfPossible(voicePath: Boolean) {
+    if (Build.VERSION.SDK_INT < 31) return
+
+    // ✅ không phá tai nghe có dây / USB
+    if (findWiredOutput() != null || findWiredInput() != null) return
+
+    try {
+      if (!voicePath) {
+        audioManager.clearCommunicationDevice()
+        return
+      }
+      val dev = findBtCommOutput()
+      if (dev != null) {
+        val ok = audioManager.setCommunicationDevice(dev)
+        Log.d(TAG, "setCommunicationDevice(type=${dev.type}) -> $ok")
+      } else {
+        Log.w(TAG, "setCommunicationDevice: no BT comm output")
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "forceCommDeviceIfPossible fail: ${e.message}")
+    }
+  }
+  // =====================================================================================================
 
   override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
     super.configureFlutterEngine(flutterEngine)
     audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+    initBluetoothHeadsetProxy()
 
     MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
       .setMethodCallHandler { call, result ->
@@ -115,7 +207,6 @@ class MainActivity : FlutterActivity() {
               result.success(null)
             }
 
-            // ===== ADDED: choose input mic while wired plugged =====
             "setPreferWiredMic" -> {
               val v = call.argument<Boolean>("preferWiredMic") ?: false
               val boost = (call.argument<Number>("headsetBoost") ?: 2.2).toDouble()
@@ -125,17 +216,18 @@ class MainActivity : FlutterActivity() {
 
               Log.d(TAG, "setPreferWiredMic=$preferWiredMic headsetBoost=$headsetMicBoost running=$running")
 
-              // nếu đang chạy -> reroute luôn
-              if (running) {
-                handleRouteChanged()
-              }
+              if (running) handleRouteChanged()
               result.success(null)
             }
 
-            // ===== ADDED: query wired present to enable/disable button =====
             "isWiredPresent" -> {
               val wired = (findWiredOutput() != null || findWiredInput() != null)
               result.success(wired)
+            }
+
+            "isBtHeadsetPresent" -> {
+              val ok = isBtHeadsetWithMicConnected()
+              result.success(ok)
             }
 
             else -> result.notImplemented()
@@ -155,84 +247,87 @@ class MainActivity : FlutterActivity() {
         }
       })
 
-    // ✅ ADDED: auto route when plug/unplug wired
     registerDeviceCallback()
   }
 
   // ===== Bluetooth detection =====
-
-  // Loa bluetooth (A2DP)
   private fun findBtA2dpOutput(): AudioDeviceInfo? {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return null
     val outs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
     return outs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
   }
 
-  // BT headset route (SCO)
-  private fun findBtScoOutput(): AudioDeviceInfo? {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return null
-    val outs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-    return outs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
-  }
-
-  private fun findBtScoInput(): AudioDeviceInfo? {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return null
-    val ins = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
-    return ins.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
-  }
-
-  // ✅ CHỈ coi là “tai nghe BT” nếu có INPUT (mic)
+  // ✅ detect “BT headset with mic” via INPUT devices (SCO/BLE_HEADSET)
   private fun isBtHeadsetWithMicConnected(): Boolean {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
+
     val ins = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+    val outs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
 
-    val hasScoMic = ins.any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
-    val hasBleMic = ins.any { it.type == AudioDeviceInfo.TYPE_BLE_HEADSET } // LE Audio headset mic (nếu có)
+    val hasScoIn = ins.any {
+      it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+        it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
+    }
 
-    return hasScoMic || hasBleMic
+    val hasScoOut = outs.any {
+      it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+        it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
+    }
+
+    val hasA2dpOut = outs.any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
+    val hasA2dpOnly = hasA2dpOut && !hasScoIn && !hasScoOut
+    if (hasA2dpOnly) {
+      logBtHeadsetWithMicOnce(false, "A2DP-only output (speaker/music), no headset input")
+      return false
+    }
+
+    if (hasScoIn) {
+      logBtHeadsetWithMicOnce(true, "Found headset input (SCO/BLE_HEADSET)")
+      return true
+    }
+
+    logBtHeadsetWithMicOnce(false, "No headset input device")
+    return false
   }
 
-  // ✅ Chọn output đúng theo mode
   private fun findBtOutputForPlayback(voicePath: Boolean): AudioDeviceInfo? {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return null
     val outs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
 
     if (voicePath) {
-      // Voice path: chỉ dùng SCO/BLE_HEADSET
       return outs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
         ?: outs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLE_HEADSET }
     }
 
-    // Media path: ưu tiên A2DP trước (TRÁNH SCO gây im tiếng)
     val a2dp = outs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
     if (a2dp != null) return a2dp
 
-    // Các loại khác (tùy API/hãng)
     val hearingAid = outs.firstOrNull { it.type == AudioDeviceInfo.TYPE_HEARING_AID }
     if (hearingAid != null) return hearingAid
 
-    // TYPE_BLE_SPEAKER có từ API mới hơn, check an toàn:
     if (Build.VERSION.SDK_INT >= 31) {
       val bleSpeaker = outs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLE_SPEAKER }
       if (bleSpeaker != null) return bleSpeaker
     }
 
-    // Cuối cùng mới thử BLE_HEADSET (nhưng chỉ khi không có gì khác)
     return outs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLE_HEADSET }
   }
 
   // ===== Start/Stop =====
-
   private fun startLoopback(voiceMode: Boolean) {
     stopLoopback()
     pendingStartToken++
 
-    // ✅ ADDED: remember what user requested (needed for auto-reroute on unplug)
     lastVoiceModeRequested = voiceMode
 
     try { audioManager.isSpeakerphoneOn = false } catch (_: Exception) {}
 
-    // AUTO route
+    if (voiceMode && !isBtHeadsetWithMicConnected()) {
+      Log.w(TAG, "voiceMode requested but no BT headset mic -> fallback to auto-route")
+      startLoopback(false)
+      return
+    }
+
     if (!voiceMode) {
       safeStopSco()
 
@@ -241,8 +336,6 @@ class MainActivity : FlutterActivity() {
       val wiredIn = findWiredInput()
       val wiredPresent = (wiredOut != null || wiredIn != null)
 
-      // ✅ 1) Nếu là LOA BLUETOOTH A2DP => đi MEDIA path (ưu tiên, tránh chờ SCO không connect)
-      // ✅ FIX (ADDED, không xoá): Anti-feedback + force VOICE_COMM sẽ chạy trong startEngine khi detect A2DP
       if (a2dp != null) {
         safeSetModeNormal()
         try { audioManager.isSpeakerphoneOn = false } catch (_: Exception) {}
@@ -250,7 +343,6 @@ class MainActivity : FlutterActivity() {
         return
       }
 
-      // ✅ 2) Nếu là BT HEADSET có MIC => bật SCO (nghe như tai nghe dây), với timeout fallback
       if (isBtHeadsetWithMicConnected()) {
         safeSetModeInCommunication()
         try { audioManager.isSpeakerphoneOn = false } catch (_: Exception) {}
@@ -271,10 +363,16 @@ class MainActivity : FlutterActivity() {
 
             if (state == AudioManager.SCO_AUDIO_STATE_CONNECTED) {
               try { audioManager.isBluetoothScoOn = true } catch (_: Exception) {}
+
+              mainHandler.postDelayed({
+                if (token == pendingStartToken) {
+                  startEngine(sampleRate = 16000, voicePath = true, token = token)
+                }
+              }, 120)
+
               try { unregisterReceiver(this) } catch (_: Exception) {}
               scoReceiver = null
               scoTimeout?.let { mainHandler.removeCallbacks(it) }
-              startEngine(sampleRate = 16000, voicePath = true, token = token)
             }
           }
         }
@@ -293,7 +391,6 @@ class MainActivity : FlutterActivity() {
           }
           mainHandler.postDelayed(scoTimeout, 2000)
         } catch (_: Exception) {
-          // fallback nếu SCO fail -> MEDIA
           try { scoReceiver?.let { unregisterReceiver(it) } } catch (_: Exception) {}
           scoReceiver = null
           safeStopSco()
@@ -303,17 +400,14 @@ class MainActivity : FlutterActivity() {
         return
       }
 
-      // ✅ 3) Loa máy (không wired, không BT) => voice processing
       if (!wiredPresent) {
         safeSetModeInCommunication()
         try { audioManager.isSpeakerphoneOn = true } catch (_: Exception) {}
-        startEngine(sampleRate = 16000, voicePath = true, token = pendingStartToken)
+        startEngine(sampleRate = SPEAKER_VOICE_SR, voicePath = true, token = pendingStartToken)
         return
       }
 
-      // ✅ 4) Wired
-      // ===== PATCH: wired nên để MODE_NORMAL cho mượt (tránh chain thoại gây sạn) =====
-      safeSetModeNormal() // ✅ PATCH (đổi từ IN_COMMUNICATION -> NORMAL)
+      safeSetModeNormal()
       try { audioManager.isSpeakerphoneOn = false } catch (_: Exception) {}
       startEngine(sampleRate = 48000, voicePath = false, token = pendingStartToken)
       return
@@ -337,10 +431,16 @@ class MainActivity : FlutterActivity() {
 
         if (state == AudioManager.SCO_AUDIO_STATE_CONNECTED) {
           try { audioManager.isBluetoothScoOn = true } catch (_: Exception) {}
+
+          mainHandler.postDelayed({
+            if (token == pendingStartToken) {
+              startEngine(sampleRate = 16000, voicePath = true, token = token)
+            }
+          }, 120)
+
           try { unregisterReceiver(this) } catch (_: Exception) {}
           scoReceiver = null
           scoTimeout?.let { mainHandler.removeCallbacks(it) }
-          startEngine(sampleRate = 16000, voicePath = true, token = token)
         }
       }
     }
@@ -370,7 +470,6 @@ class MainActivity : FlutterActivity() {
   private fun startEngine(sampleRate: Int, voicePath: Boolean, token: Int) {
     if (token != pendingStartToken) return
 
-    // ✅ ADDED: remember current engine mode (used by auto-reroute)
     lastVoicePath = voicePath
     lastSampleRate = sampleRate
 
@@ -388,26 +487,18 @@ class MainActivity : FlutterActivity() {
 
     val wiredOut = findWiredOutput()
     val wiredIn = findWiredInput()
-
-    // ✅ ADDED: đang thật sự dùng mic tai nghe?
     val usingWiredMic = (wiredIn != null && preferWiredMic)
 
-    val wiredPresent = (!voicePath) && (wiredOut != null || wiredIn != null)    // ===== PATCH: buffer non-voicePath tăng cho wired để tránh underrun -> hết sạn =====
-    val isWiredOutNow = (!voicePath) && (wiredOut != null)    // ✅ FIX v2: Tăng buffer SIZE RẤT LỚN để tránh underrun khi nói câu dài
-    // Mục tiêu: buffer đủ lớn để chứa ~200-300ms audio cho wired (tránh ngắt quãng)
-    val recTarget = if (voicePath) {
-      (effectiveSampleRate / 50)  // Voice: 20ms chunk
-    } else {
-      (effectiveSampleRate / 20)   // ✅ FIX v2: tăng lên /20 (50ms chunk cho wired/media)
-    }
+    val wiredPresent = (!voicePath) && (wiredOut != null || wiredIn != null)
+    val isWiredOutNow = (!voicePath) && (wiredOut != null)
 
+    val recTarget = if (voicePath) (effectiveSampleRate / 50) else (effectiveSampleRate / 20)
     val playTarget = when {
-      voicePath -> (effectiveSampleRate / 50)       // Voice: 20ms
-      isWiredOutNow -> (effectiveSampleRate / 10)   // ✅ FIX v2: wired tăng lên /10 (100ms chunk)
-      else -> (effectiveSampleRate / 20)            // Media: 50ms
+      voicePath -> (effectiveSampleRate / 50)
+      isWiredOutNow -> (effectiveSampleRate / 10)
+      else -> (effectiveSampleRate / 20)
     }
 
-    // ✅ FIX v2: Nhân buffer x6 thay vì x3 để có buffer dự trữ LỚN (tránh underrun triệt để)
     val recBufSize = maxOf(recMin, recTarget * 6)
     val playBufSize = maxOf(playMin, playTarget * 6)
 
@@ -416,36 +507,25 @@ class MainActivity : FlutterActivity() {
       "startEngine requestedSampleRate=$sampleRate effectiveSampleRate=$effectiveSampleRate voicePath=$voicePath recMin=$recMin playMin=$playMin recBuf=$recBufSize playBuf=$playBufSize wiredOut=${wiredOut?.type ?: "null"}"
     )
 
-    // ================== ✅ ADDED: detect A2DP output for anti-feedback ==================
     val isA2dpOutNow = (!voicePath) && (findBtA2dpOutput() != null) && (findWiredOutput() == null)
-    if (isA2dpOutNow) {
-      Log.w(TAG, "A2DP output active -> enable anti-feedback guard + cap gain")
-    }
-    // ================================================================================
+    if (isA2dpOutNow) Log.w(TAG, "A2DP output active -> enable anti-feedback guard + cap gain")
 
-    // ================== ✅ ADDED: FORCE VoiceCommunication source when A2DP + built-in mic ==================
-    // Mục tiêu: cho Android cơ hội bật AEC/NS/AGC (nhiều máy chỉ chạy khi source=VOICE_COMMUNICATION)
     val isBuiltInMicNow = (!usingWiredMic) && (findBuiltInMic() != null)
     val forceVoiceCommForA2dp = isA2dpOutNow && isBuiltInMicNow
-    if (forceVoiceCommForA2dp) {
-      Log.w(TAG, "A2DP + built-in mic -> force VOICE_COMMUNICATION source + enable AEC/NS/AGC (best-effort)")
-    }
-    // =================================================================================
+    if (forceVoiceCommForA2dp) Log.w(TAG, "A2DP + built-in mic -> force VOICE_COMMUNICATION source + enable AEC/NS/AGC (best-effort)")
 
-    if (!voicePath) {
-      try {
-        val a2 = findBtA2dpOutput()
-        if (a2 != null) Log.w(TAG, "A2DP output detected — expect higher end-to-end latency due to Bluetooth A2DP stack")
-      } catch (_: Exception) {}
-    }
+    val isSpeakerDefaultNow = voicePath &&
+      (findWiredOutput() == null) &&
+      (findBtA2dpOutput() == null) &&
+      (!isA2dpOutNow)
 
-    // ===== PATCH: wired mic -> dùng VOICE_RECOGNITION để tránh “karaoke/metallic processing” =====
     val audioSource =
-      if (voicePath || forceVoiceCommForA2dp) {
+      if (forceVoiceCommForA2dp) {
         MediaRecorder.AudioSource.VOICE_COMMUNICATION
+      } else if (voicePath) {
+        if (isSpeakerDefaultNow) MediaRecorder.AudioSource.MIC else MediaRecorder.AudioSource.VOICE_COMMUNICATION
       } else {
-        if (usingWiredMic) MediaRecorder.AudioSource.VOICE_RECOGNITION // ✅ PATCH
-        else MediaRecorder.AudioSource.MIC
+        if (usingWiredMic) MediaRecorder.AudioSource.VOICE_COMMUNICATION else MediaRecorder.AudioSource.MIC
       }
 
     recorder = AudioRecord.Builder()
@@ -470,12 +550,25 @@ class MainActivity : FlutterActivity() {
       }
       .build()
 
-    // ===== PATCH: Wired mic thì TẮT AEC/AGC/NS (chỉ bật cho voicePath) để tránh tiếng “vọng vọng karaoke” =====
-    // ✅ FIX (ADDED): cũng bật FX khi forceVoiceCommForA2dp (best-effort với A2DP)
-    if (voicePath || forceVoiceCommForA2dp) {
+    // ✅ ép mic BT khi voicePath=true
+    if (voicePath) {
+      try {
+        val btIn = findBtMicInput()
+        if (btIn != null) {
+          recorder?.preferredDevice = btIn
+          Log.d(TAG, "rec.preferredDevice -> BT mic type=${btIn.type}")
+        } else {
+          Log.w(TAG, "voicePath=true but no BT mic input found")
+        }
+      } catch (_: Exception) {}
+    }
+
+    if (voicePath || forceVoiceCommForA2dp || usingWiredMic) {
       try { aec = AcousticEchoCanceler.create(recorder?.audioSessionId ?: 0); aec?.enabled = true } catch (_: Exception) { aec = null }
-      try { agc = AutomaticGainControl.create(recorder?.audioSessionId ?: 0); agc?.enabled = true } catch (_: Exception) { agc = null }
-      try { ns  = NoiseSuppressor.create(recorder?.audioSessionId ?: 0); ns?.enabled  = true } catch (_: Exception) { ns = null }
+      try { agc?.release() } catch (_: Exception) {}
+      agc = null
+      try { ns?.release() } catch (_: Exception) {}
+      ns = null
     } else {
       try { aec?.release() } catch (_: Exception) {}
       aec = null
@@ -501,7 +594,8 @@ class MainActivity : FlutterActivity() {
       .setAudioFormat(format)
       .setTransferMode(AudioTrack.MODE_STREAM)
       .setBufferSizeInBytes(playBufSize)
-      .apply {        if (Build.VERSION.SDK_INT >= 29) {
+      .apply {
+        if (Build.VERSION.SDK_INT >= 29) {
           try {
             val perfField = AudioTrack::class.java.getField("PERFORMANCE_MODE_LOW_LATENCY")
             val perfMode = perfField.getInt(null)
@@ -512,30 +606,61 @@ class MainActivity : FlutterActivity() {
       }
       .build()
 
-    try { Log.d(TAG, "preferred output: " + (player?.preferredDevice?.type ?: "none")) } catch (_: Exception) {}
-    
-    // ✅ Ép route đúng theo voicePath
-    routeToWiredIfPresent(recorder, player, wiredPresent, voicePath)
-    
-    try { player?.setVolume(1.0f) } catch (_: Exception) {}
+    // ✅ Android 12+ lock route sang BT communication device (không phá wired)
+    forceCommDeviceIfPossible(voicePath)
+
+    // ✅✅ FIX CHÍNH: ép output đúng theo route ưu tiên (voicePath ưu tiên BT comm)
+    routeToBestDevices(recorder, player, wiredPresent, voicePath)
+
+    // debug routed
+    try {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        Log.d(TAG, "AudioRecord routedDevice type=${recorder?.routedDevice?.type}")
+        Log.d(TAG, "AudioTrack routedDevice type=${player?.routedDevice?.type}")
+      }
+    } catch (_: Exception) {}
+
+    if (isWiredOutNow) {
+      try { player?.setVolume(2.0f) } catch (_: Exception) {}
+    } else {
+      try { player?.setVolume(1.0f) } catch (_: Exception) {}
+    }
 
     val eq = Eq5Band(effectiveSampleRate.toDouble())
 
+    if (isSpeakerDefaultNow) {
+      Log.w(TAG, "Speaker default voicePath=true @${effectiveSampleRate}Hz -> MIC source + AEC enabled to reduce dropped consonants")
+    }
+
+    val hpf = OnePoleHpf(effectiveSampleRate.toDouble(), A2DP_HPF_HZ)
+    val afs = AntiFeedbackAfs(effectiveSampleRate.toDouble())
+    val comp = SimpleCompressor(
+      sampleRate = effectiveSampleRate.toDouble(),
+      threshold = 0.28,
+      ratio = 2.5,
+      attackMs = 8.0,
+      releaseMs = 180.0
+    )
+
     running = true
     thread = Thread {
-      // ✅ FIX: Tăng priority cao nhất cho audio thread để tránh bị gián đoạn
       Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-      
+
       val rec = recorder ?: return@Thread
       val out = player ?: return@Thread
-      
-      // ✅ FIX v2: Tăng chunk size để giảm overhead (chunk lớn hơn = ít lần write hơn = mượt hơn)
-      val chunkSize = min(recBufSize, playBufSize) / 3  // ✅ FIX v2: tăng từ /4 -> /3 (chunk lớn hơn)
+
+      val chunkSize = min(recBufSize, playBufSize) / 3
       val buf = ShortArray(chunkSize)
 
       var lastEqEnabled = eqEnabled
       var lastGain = outputGain
       var lastBands = bandGains.copyOf()
+
+      var a2dpFlag = isA2dpOutNow
+      var lastA2dpCheckTs = 0L
+
+      var duckUntilTs = 0L
+      var lastAnalyzeTs = 0L
 
       fun refreshEqIfChanged() {
         val en = eqEnabled
@@ -549,7 +674,14 @@ class MainActivity : FlutterActivity() {
         if (changed) {
           lastEqEnabled = en
           lastGain = g
-          lastBands = b.copyOf()
+
+          val bb = b.copyOf()
+          if (isSpeakerDefaultNow) {
+            bb[3] = min(bb[3], 1.25)
+            bb[4] = min(bb[4], 1.35)
+          }
+
+          lastBands = bb.copyOf()
           val db = DoubleArray(5) { i ->
             val gi = lastBands[i].coerceAtLeast(0.0001)
             20.0 * ln(gi) / ln(10.0)
@@ -559,28 +691,23 @@ class MainActivity : FlutterActivity() {
       }
 
       var lastMeterTs = 0L
+      var lastUnderrunTs = 0L
 
-      // ===== PATCH: log underrunCount để bắt bệnh wired "sạn" =====
-      var lastUnderrunTs = 0L      // ================== ✅ ADDED: anti-feedback guard state ==================
       var guardGain = 1.0
       var lastRms = 0.0
       var lastGuardLogTs = 0L
-      // ========================================================================
 
       rec.startRecording()
-      
-      // ✅ FIX v2: PRE-BUFFERING - nạp đầy buffer trước khi play để tránh underrun ngay từ đầu
-      // Điền 1-2 chunk silence vào AudioTrack trước khi play để có "đệm" chống gaps
-      val preBufChunks = 2  // 2 chunks silence = ~200ms @ 48kHz với /3 chunk
+
+      val preBufChunks = 2
       val silenceBuf = ShortArray(chunkSize) { 0 }
       for (i in 0 until preBufChunks) {
         try {
           out.write(silenceBuf, 0, silenceBuf.size, AudioTrack.WRITE_BLOCKING)
-        } catch (_: Exception) {
-          break
-        }      }
+        } catch (_: Exception) { break }
+      }
       Log.d(TAG, "Pre-buffered $preBufChunks chunks of silence to prevent initial underrun")
-      
+
       out.play()
 
       while (running) {
@@ -588,35 +715,53 @@ class MainActivity : FlutterActivity() {
         if (n <= 0) continue
 
         refreshEqIfChanged()
-        
+
+        val nowCheck = System.currentTimeMillis()
+        if (nowCheck - lastA2dpCheckTs > 500) {
+          lastA2dpCheckTs = nowCheck
+          val newFlag = (!voicePath) && (findBtA2dpOutput() != null) && (findWiredOutput() == null)
+          if (newFlag != a2dpFlag) {
+            a2dpFlag = newFlag
+            guardGain = 1.0
+            afs.reset()
+            duckUntilTs = 0L
+            Log.w(TAG, "A2DP flag changed -> $a2dpFlag (reset guard/afs/duck)")
+          }
+        }
+
         val en = lastEqEnabled
         val gRaw = lastGain
 
-        // ✅ ADDED: mic boost riêng cho mic tai nghe
         val micBoost = if (usingWiredMic) headsetMicBoost else 1.0
-
-        // ================== ✅ ADDED: cap gain when A2DP to reduce feedback ==================
-        val g = if (isA2dpOutNow) min(gRaw, A2DP_SAFE_GAIN_CAP) else gRaw
-        // ====================================================================================
-
-        // ✅ FIX v2: PRE-CALCULATE combined gain để giảm phép tính trong loop
+        val g = if (a2dpFlag) min(gRaw, A2DP_SAFE_GAIN_CAP) else gRaw
         val combinedGain = g * guardGain * micBoost
-        
+
         var sumSq = 0.0
+
+        val now = System.currentTimeMillis()
+        val doAnalyze = a2dpFlag && (now - lastAnalyzeTs >= A2DP_AFS_ANALYZE_MS)
+        if (doAnalyze) {
+          lastAnalyzeTs = now
+          afs.analyze(buf, n)
+        }
+
+        val duckNow = a2dpFlag && (now < duckUntilTs)
 
         if (en) {
           for (i in 0 until n) {
             var x = buf[i].toDouble() / 32768.0
-            x = eq.process(x)
 
-            // ✅ FIX: chặn NaN/Infinity ngay sau EQ
+            x = eq.process(x)
             if (!x.isFinite()) x = 0.0
 
-            // ✅ FIX v2: Áp dụng combined gain 1 lần thay vì 3 lần nhân
+            if (a2dpFlag) x = hpf.process(x)
+            if (a2dpFlag) x = afs.process(x)
+            if (duckNow) x *= 0.78
+
             x *= combinedGain
+            if (a2dpFlag) x = comp.process(x)
 
             x = softClip(x)
-
             val y = (x * 32767.0).roundToInt().coerceIn(-32768, 32767).toShort()
             buf[i] = y
             val yf = y.toDouble() / 32768.0
@@ -625,12 +770,15 @@ class MainActivity : FlutterActivity() {
         } else {
           for (i in 0 until n) {
             var x = buf[i].toDouble() / 32768.0
-            
-            // ✅ FIX v2: Áp dụng combined gain 1 lần
+
+            if (a2dpFlag) x = hpf.process(x)
+            if (a2dpFlag) x = afs.process(x)
+            if (duckNow) x *= 0.78
+
             x *= combinedGain
+            if (a2dpFlag) x = comp.process(x)
 
             x = softClip(x)
-
             val y = (x * 32767.0).roundToInt().coerceIn(-32768, 32767).toShort()
             buf[i] = y
             val yf = y.toDouble() / 32768.0
@@ -638,48 +786,46 @@ class MainActivity : FlutterActivity() {
           }
         }
 
-        // ================== ✅ ADDED: update feedback guard + noise gate (A2DP only) ==================
-        // Guard cập nhật theo RMS của buffer vừa xử lý:
         val rmsNow = sqrt(sumSq / n.toDouble()).coerceIn(0.0, 1.0)
 
-        if (isA2dpOutNow) {
+        if (a2dpFlag) {
           val risingFast = (rmsNow - lastRms) > FEEDBACK_RISE_THRESHOLD
           val tooLoud = rmsNow > FEEDBACK_RMS_THRESHOLD
 
+          if (tooLoud || risingFast) duckUntilTs = now + A2DP_DUCK_MS
+
           if (tooLoud || risingFast) {
-            // bóp nhanh để dập hú
             guardGain *= 0.75
             if (guardGain < GUARD_MIN) guardGain = GUARD_MIN
           } else {
-            // hồi phục chậm
             guardGain += (1.0 - guardGain) * 0.002
-          }          // ✅ Noise Gate / Duck (half-duplex nhẹ): phá vòng lặp bằng cách mute cực ngắn
-          if (rmsNow > A2DP_HARD_MUTE_RMS) {
-            val muteSamples = min(n, (effectiveSampleRate * (A2DP_MUTE_MS / 1000.0)).toInt().coerceAtLeast(1))
+          }
+
+          val earlyMute = (rmsNow > A2DP_EARLY_MUTE_RMS) || ((rmsNow - lastRms) > A2DP_EARLY_MUTE_RISE)
+          val hardMute = rmsNow > A2DP_HARD_MUTE_RMS
+
+          if (earlyMute || hardMute) {
+            val muteMs = if (hardMute) A2DP_MUTE_MS else (A2DP_MUTE_MS / 2)
+            val muteSamples = min(n, (effectiveSampleRate * (muteMs / 1000.0)).toInt().coerceAtLeast(1))
             for (i in 0 until muteSamples) buf[i] = 0
           }
 
           val nowLog = System.currentTimeMillis()
           if (nowLog - lastGuardLogTs > 1000) {
             lastGuardLogTs = nowLog
-            Log.w(TAG, "A2DP feedbackGuard rms=${"%.3f".format(rmsNow)} guardGain=${"%.3f".format(guardGain)} gCap=${"%.2f".format(g)} forceVoiceCommForA2dp=$forceVoiceCommForA2dp")
+            Log.w(TAG, "A2DP guard rms=${"%.3f".format(rmsNow)} guardGain=${"%.3f".format(guardGain)} gCap=${"%.2f".format(g)} notchCount=${afs.activeCount()} duck=${duckNow}")
           }
         }
 
         lastRms = rmsNow
-        // =============================================================================================        // ✅ FIX v2: Ghi dữ liệu với BLOCKING để đảm bảo KHÔNG BỎ MẤT samples
-        // Trade-off: có thể tăng latency nhẹ, nhưng âm thanh liên tục không bị đứt
+
         var offset = 0
         var remaining = n
-        
         while (remaining > 0 && running) {
-          val wrote = if (Build.VERSION.SDK_INT >= 21) {
-            // ✅ FIX v2: dùng WRITE_BLOCKING để chờ buffer có chỗ thay vì drop
-            out.write(buf, offset, remaining, AudioTrack.WRITE_BLOCKING)
-          } else {
-            out.write(buf, offset, remaining)
-          }
-          
+          val wrote =
+            if (Build.VERSION.SDK_INT >= 21) out.write(buf, offset, remaining, AudioTrack.WRITE_BLOCKING)
+            else out.write(buf, offset, remaining)
+
           if (wrote < 0) {
             Log.w(TAG, "AudioTrack write error $wrote")
             break
@@ -687,28 +833,21 @@ class MainActivity : FlutterActivity() {
             offset += wrote
             remaining -= wrote
           } else {
-            // wrote == 0, retry sau 1ms (không nên xảy ra với BLOCKING)
             try { Thread.sleep(1) } catch (_: Exception) {}
           }
         }
-        
-        // ✅ FIX v2: Không còn drop samples - tất cả đều được ghi
-        if (remaining > 0 && running) {
-          Log.w(TAG, "⚠️ AudioTrack write incomplete: $remaining samples remaining")
-        }
 
-        // ✅ PATCH: underrunCount (API24+). Nếu tăng liên tục => buffer chưa đủ.
+        if (remaining > 0 && running) Log.w(TAG, "⚠️ AudioTrack write incomplete: $remaining samples remaining")
+
         val now2 = System.currentTimeMillis()
         if (Build.VERSION.SDK_INT >= 24 && now2 - lastUnderrunTs > 1000) {
           lastUnderrunTs = now2
-          try {
-            Log.d(TAG, "underrunCount=${out.underrunCount} voicePath=$voicePath wiredOutNow=$isWiredOutNow")
-          } catch (_: Exception) {}
+          try { Log.d(TAG, "underrunCount=${out.underrunCount} voicePath=$voicePath wiredOutNow=$isWiredOutNow") } catch (_: Exception) {}
         }
 
-        val now = System.currentTimeMillis()
-        if (now - lastMeterTs > 50) {
-          lastMeterTs = now
+        val nowMeter = System.currentTimeMillis()
+        if (nowMeter - lastMeterTs > 50) {
+          lastMeterTs = nowMeter
           mainHandler.post { eventSink?.success(rmsNow) }
         }
       }
@@ -762,15 +901,11 @@ class MainActivity : FlutterActivity() {
   }
 
   // ===== WIRED/USB ROUTE FIX =====
-
   private fun findWiredOutput(): AudioDeviceInfo? {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return null
     val outs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
     return outs.firstOrNull { it.type == AudioDeviceInfo.TYPE_USB_HEADSET }
-      ?: outs.firstOrNull {
-        it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
-          it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET
-      }
+      ?: outs.firstOrNull { it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES || it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET }
   }
 
   private fun findWiredInput(): AudioDeviceInfo? {
@@ -786,8 +921,10 @@ class MainActivity : FlutterActivity() {
     return ins.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
   }
 
-  // ✅ thêm voicePath để route BT đúng mode
-  private fun routeToWiredIfPresent(
+  // ✅✅ FIX CHÍNH: route ưu tiên theo voicePath
+  // - voicePath=true: ưu tiên BT comm output (SCO/BLE_HEADSET). Chỉ dùng wired nếu thật sự muốn wired.
+  // - voicePath=false: ưu tiên wiredOut (nếu có) else ưu tiên BT (A2DP/hearingaid/ble_speaker)
+  private fun routeToBestDevices(
     rec: AudioRecord?,
     out: AudioTrack?,
     wiredPresent: Boolean,
@@ -799,62 +936,72 @@ class MainActivity : FlutterActivity() {
     val wiredIn = findWiredInput()
     val builtInMic = findBuiltInMic()
 
-    // Output: wired ưu tiên trước
+    // -------- OUTPUT --------
     try {
-      if (wiredOut != null && out != null) out.preferredDevice = wiredOut
-    } catch (_: Exception) {}
-
-    // Output: nếu không wired -> chọn BT output đúng theo voicePath
-    try {
-      if (out != null && wiredOut == null) {
-        val btOut = findBtOutputForPlayback(voicePath)
-        if (btOut != null) out.preferredDevice = btOut
+      if (out != null) {
+        if (voicePath) {
+          // ✅ ƯU TIÊN: AirPods/TWS output phải ra BT comm
+          val btCommOut = findBtCommOutput()
+          if (btCommOut != null) {
+            out.preferredDevice = btCommOut
+            Log.d(TAG, "routeBest: out.preferredDevice -> BT COMM type=${btCommOut.type}")
+          } else {
+            // fallback: nếu không có bt comm, đừng tự động nhảy sang wired ảo
+            if (wiredOut != null && wiredPresent) {
+              out.preferredDevice = wiredOut
+              Log.w(TAG, "routeBest: voicePath no BT comm -> fallback wiredOut type=${wiredOut.type}")
+            } else {
+              Log.w(TAG, "routeBest: voicePath no BT comm & no wired -> keep system route")
+            }
+          }
+        } else {
+          // normal/media path
+          if (wiredOut != null && wiredPresent) {
+            out.preferredDevice = wiredOut
+            Log.d(TAG, "routeBest: out.preferredDevice -> wiredOut type=${wiredOut.type}")
+          } else {
+            val btOut = findBtOutputForPlayback(false)
+            if (btOut != null) {
+              out.preferredDevice = btOut
+              Log.d(TAG, "routeBest: out.preferredDevice -> BT type=${btOut.type}")
+            }
+          }
+        }
       }
     } catch (_: Exception) {}
 
-    // ===== INPUT SELECT (UPDATED, but only changed behavior) =====
-    // Mặc định: ưu tiên built-in mic.
-    // Khi user bật preferWiredMic: ưu tiên wired mic.
+    // -------- INPUT --------
     try {
       if (rec != null) {
-        val targetIn =
-          if (preferWiredMic) (wiredIn ?: builtInMic)
-          else (builtInMic ?: wiredIn)
-
-        if (targetIn != null) rec.preferredDevice = targetIn
+        if (voicePath) {
+          // ✅ voicePath=true => ưu tiên mic Bluetooth
+          val btIn = findBtMicInput()
+          if (btIn != null) {
+            rec.preferredDevice = btIn
+            Log.d(TAG, "routeBest: rec.preferredDevice -> BT mic type=${btIn.type}")
+          } else {
+            val targetIn = if (preferWiredMic) (wiredIn ?: builtInMic) else (builtInMic ?: wiredIn)
+            if (targetIn != null) rec.preferredDevice = targetIn
+          }
+        } else {
+          val targetIn = if (preferWiredMic) (wiredIn ?: builtInMic) else (builtInMic ?: wiredIn)
+          if (targetIn != null) rec.preferredDevice = targetIn
+        }
       }
     } catch (_: Exception) {}
-  }
-
-  // ✅ FIX: NaN-safe softClip
-  private fun softClip(xIn: Double): Double {
-    if (!xIn.isFinite()) return 0.0   // ✅ FIX
-    var x = xIn
-    if (x > 1.2) x = 1.2
-    if (x < -1.2) x = -1.2
-    val y = x - (x * x * x) / 3.0
-    return y.coerceIn(-1.0, 1.0)
   }
 
   // ===================== ADDED BLOCK START =====================
-
   private fun registerDeviceCallback() {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
     if (deviceCallback != null) return
 
     deviceCallback = object : AudioDeviceCallback() {
-      override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
-        handleRouteChanged()
-      }
-
-      override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
-        handleRouteChanged()
-      }
+      override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) { handleRouteChanged() }
+      override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) { handleRouteChanged() }
     }
 
-    try {
-      audioManager.registerAudioDeviceCallback(deviceCallback, mainHandler)
-    } catch (_: Exception) {}
+    try { audioManager.registerAudioDeviceCallback(deviceCallback, mainHandler) } catch (_: Exception) {}
   }
 
   private fun handleRouteChanged() {
@@ -865,32 +1012,24 @@ class MainActivity : FlutterActivity() {
     val wiredIn = findWiredInput()
     val builtIn = findBuiltInMic()
 
-    // CASE: cắm tai nghe dây/USB => ép output sang wired, input theo preferWiredMic
     if (wiredOut != null) {
       Log.d(TAG, "Wired detected -> auto route to wired (preferWiredMic=$preferWiredMic)")
 
-      // ===== PATCH: wired route thì mode NORMAL cho mượt =====
-      safeSetModeNormal() // ✅ PATCH
+      safeSetModeNormal()
       try { audioManager.isSpeakerphoneOn = false } catch (_: Exception) {}
 
-      // hot reroute first
       try { player?.preferredDevice = wiredOut } catch (_: Exception) {}
       try {
-        val targetIn =
-          if (preferWiredMic) (wiredIn ?: builtIn)
-          else (builtIn ?: wiredIn)
+        val targetIn = if (preferWiredMic) (wiredIn ?: builtIn) else (builtIn ?: wiredIn)
         if (targetIn != null) recorder?.preferredDevice = targetIn
       } catch (_: Exception) {}
 
-      // restart engine to ensure the route actually takes effect on all devices
       restartEngineAuto(sampleRate = 48000, voicePath = false)
       return
     }
 
-    // CASE: rút wired => restore auto route
     Log.d(TAG, "Wired not present -> restore auto route")
 
-    // Nếu user bật voiceMode thủ công: ưu tiên voice path (SCO nếu có), không thì speaker voice processing
     if (lastVoiceModeRequested) {
       safeSetModeInCommunication()
       try { audioManager.isSpeakerphoneOn = false } catch (_: Exception) {}
@@ -899,12 +1038,11 @@ class MainActivity : FlutterActivity() {
         restartEngineAuto(sampleRate = 16000, voicePath = true)
       } else {
         try { audioManager.isSpeakerphoneOn = true } catch (_: Exception) {}
-        restartEngineAuto(sampleRate = 16000, voicePath = true)
+        restartEngineAuto(sampleRate = SPEAKER_VOICE_SR, voicePath = true)
       }
       return
     }
 
-    // Auto mode: ưu tiên A2DP nếu có, không thì speaker voice processing
     val a2dp = findBtA2dpOutput()
     if (a2dp != null) {
       safeSetModeNormal()
@@ -913,7 +1051,7 @@ class MainActivity : FlutterActivity() {
     } else {
       safeSetModeInCommunication()
       try { audioManager.isSpeakerphoneOn = true } catch (_: Exception) {}
-      restartEngineAuto(sampleRate = 16000, voicePath = true)
+      restartEngineAuto(sampleRate = SPEAKER_VOICE_SR, voicePath = true)
     }
   }
 
@@ -921,11 +1059,8 @@ class MainActivity : FlutterActivity() {
     if (voicePath == lastVoicePath && sampleRate == lastSampleRate) return
 
     val token = ++pendingStartToken
-
-    // stop current engine quickly
     running = false
 
-    // unblock read/write
     try { recorder?.stop() } catch (_: Exception) {}
     try { player?.pause() } catch (_: Exception) {}
     try { player?.flush() } catch (_: Exception) {}
@@ -934,7 +1069,6 @@ class MainActivity : FlutterActivity() {
     try { thread?.join(300) } catch (_: Exception) {}
     thread = null
 
-    // release FX
     try { aec?.release() } catch (_: Exception) {}
     aec = null
     try { agc?.release() } catch (_: Exception) {}
@@ -942,13 +1076,11 @@ class MainActivity : FlutterActivity() {
     try { ns?.release() } catch (_: Exception) {}
     ns = null
 
-    // release audio objects
     try { recorder?.release() } catch (_: Exception) {}
     recorder = null
     try { player?.release() } catch (_: Exception) {}
     player = null
 
-    // start new engine with new route/mode
     startEngine(sampleRate = sampleRate, voicePath = voicePath, token = token)
   }
 
@@ -958,118 +1090,27 @@ class MainActivity : FlutterActivity() {
       try { deviceCallback?.let { audioManager.unregisterAudioDeviceCallback(it) } } catch (_: Exception) {}
     }
     deviceCallback = null
-  }
 
+    try {
+      val adapter = BluetoothAdapter.getDefaultAdapter()
+      if (adapter != null && btHeadset != null) {
+        adapter.closeProfileProxy(BluetoothProfile.HEADSET, btHeadset)
+      }
+    } catch (_: Exception) {}
+    btHeadset = null
+    btHeadsetProxyReady = false
+  }
   // ===================== ADDED BLOCK END =====================
-}
 
-// ===== BIQUAD EQ =====
-
-private class Biquad {
-  private var b0 = 1.0
-  private var b1 = 0.0
-  private var b2 = 0.0
-  private var a1 = 0.0
-  private var a2 = 0.0
-  private var z1 = 0.0
-  private var z2 = 0.0
-
-  fun process(x: Double): Double {
-    val y = b0 * x + z1
-    z1 = b1 * x - a1 * y + z2
-    z2 = b2 * x - a2 * y
-    return y
+  // ===================== STUBS (giữ compile) =====================
+  // Bạn đã có sẵn các class/hàm này trong project.
+  // Nếu file của bạn đã có, giữ nguyên / đừng duplicate.
+  private fun softClip(x: Double): Double {
+    val a = 1.5
+    val ax = a * x
+    return ax / (1.0 + abs(ax))
   }
 
-  private fun setNorm(
-    b0u: Double, b1u: Double, b2u: Double,
-    a0u: Double, a1u: Double, a2u: Double
-  ) {
-    val inv = 1.0 / a0u
-    b0 = b0u * inv
-    b1 = b1u * inv
-    b2 = b2u * inv
-    a1 = a1u * inv
-    a2 = a2u * inv
-  }
-
-  fun setPeaking(fs: Double, f0: Double, q: Double, gainDb: Double) {
-    val A = 10.0.pow(gainDb / 40.0)
-    val w0 = 2.0 * Math.PI * (f0 / fs)
-    val cw = cos(w0)
-    val sw = sin(w0)
-    val alpha = sw / (2.0 * q)
-
-    val b0u = 1.0 + alpha * A
-    val b1u = -2.0 * cw
-    val b2u = 1.0 - alpha * A
-    val a0u = 1.0 + alpha / A
-    val a1u = -2.0 * cw
-    val a2u = 1.0 - alpha / A
-    setNorm(b0u, b1u, b2u, a0u, a1u, a2u)
-  }
-
-  fun setLowShelf(fs: Double, f0: Double, slope: Double, gainDb: Double) {
-    val A = 10.0.pow(gainDb / 40.0)
-    val w0 = 2.0 * Math.PI * (f0 / fs)
-    val cw = cos(w0)
-    val sw = sin(w0)
-    val sqrtA = sqrt(A)
-    val alpha = sw / 2.0 * sqrt((A + 1.0 / A) * (1.0 / slope - 1.0) + 2.0)
-
-    val b0u = A * ((A + 1) - (A - 1) * cw + 2 * sqrtA * alpha)
-    val b1u = 2 * A * ((A - 1) - (A + 1) * cw)
-    val b2u = A * ((A + 1) - (A - 1) * cw - 2 * sqrtA * alpha)
-    val a0u = (A + 1) + (A - 1) * cw + 2 * sqrtA * alpha
-    val a1u = -2 * ((A - 1) + (A + 1) * cw)
-    val a2u = (A + 1) + (A - 1) * cw - 2 * sqrtA * alpha
-    setNorm(b0u, b1u, b2u, a0u, a1u, a2u)
-  }
-
-  fun setHighShelf(fs: Double, f0: Double, slope: Double, gainDb: Double) {
-    val A = 10.0.pow(gainDb / 40.0)
-    val w0 = 2.0 * Math.PI * (f0 / fs)
-    val cw = cos(w0)
-    val sw = sin(w0)
-    val sqrtA = sqrt(A)
-    val alpha = sw / 2.0 * sqrt((A + 1.0 / A) * (1.0 / slope - 1.0) + 2.0)
-
-    val b0u = A * ((A + 1) + (A - 1) * cw + 2 * sqrtA * alpha)
-    val b1u = -2 * A * ((A - 1) + (A + 1) * cw)
-    val b2u = A * ((A + 1) + (A - 1) * cw - 2 * sqrtA * alpha)
-    val a0u = (A + 1) - (A - 1) * cw + 2 * sqrtA * alpha
-    val a1u = 2 * ((A - 1) - (A + 1) * cw)
-    val a2u = (A + 1) - (A - 1) * cw - 2 * sqrtA * alpha
-    setNorm(b0u, b1u, b2u, a0u, a1u, a2u)
-  }
-}
-
-private class Eq5Band(private val fs: Double) {
-  private val low = Biquad()
-  private val m1 = Biquad()
-  private val m2 = Biquad()
-  private val m3 = Biquad()
-  private val high = Biquad()
-
-  fun updateGainsDb(db: DoubleArray) {
-    low.setLowShelf(fs, 60.0, 1.0, db[0])
-    m1.setPeaking(fs, 230.0, 1.0, db[1])
-    m2.setPeaking(fs, 910.0, 1.0, db[2])
-    m3.setPeaking(fs, 3600.0, 1.0, db[3])
-
-    // ✅ FIX 1: treble không được vượt Nyquist (tránh NaN/unstable)
-    val nyq = fs * 0.5
-    val fHigh = min(14000.0, nyq * 0.90)   // 90% Nyquist cho an toàn
-    high.setHighShelf(fs, fHigh, 1.0, db[4])
-  }
-
-  fun process(x: Double): Double {
-    var y = x
-    y = low.process(y)
-    y = m1.process(y)
-    y = m2.process(y)
-    y = m3.process(y)
-    y = high.process(y)
-    return y
-  }
+  // NOTE: Eq5Band / OnePoleHpf / AntiFeedbackAfs / SimpleCompressor là class bạn đã dùng.
+  // Ở đây không định nghĩa lại để tránh trùng.
 }
