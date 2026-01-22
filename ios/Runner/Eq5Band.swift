@@ -1,7 +1,6 @@
 import Foundation
 
-// MARK: - Biquad (Swift port of DspEq.kt)
-
+// MARK: - Biquad (Direct Form II)
 final class Biquad {
     private var b0: Double = 1.0
     private var b1: Double = 0.0
@@ -13,7 +12,6 @@ final class Biquad {
 
     @inline(__always)
     func process(_ x: Double) -> Double {
-        // Direct Form II (same as Kotlin)
         let y = b0 * x + z1
         z1 = b1 * x - a1 * y + z2
         z2 = b2 * x - a2 * y
@@ -25,10 +23,8 @@ final class Biquad {
         z2 = 0.0
     }
 
-    private func setNorm(
-        b0u: Double, b1u: Double, b2u: Double,
-        a0u: Double, a1u: Double, a2u: Double
-    ) {
+    private func setNorm(b0u: Double, b1u: Double, b2u: Double,
+                         a0u: Double, a1u: Double, a2u: Double) {
         let inv = 1.0 / a0u
         b0 = b0u * inv
         b1 = b1u * inv
@@ -60,7 +56,6 @@ final class Biquad {
         let sw = sin(w0)
         let sqrtA = sqrt(A)
 
-        // alpha = sw/2 * sqrt((A + 1/A) * (1/slope - 1) + 2)
         let alpha = (sw / 2.0) * sqrt((A + 1.0 / A) * (1.0 / slope - 1.0) + 2.0)
 
         let b0u = A * ((A + 1.0) - (A - 1.0) * cw + 2.0 * sqrtA * alpha)
@@ -69,7 +64,6 @@ final class Biquad {
         let a0u = (A + 1.0) + (A - 1.0) * cw + 2.0 * sqrtA * alpha
         let a1u = -2.0 * ((A - 1.0) + (A + 1.0) * cw)
         let a2u = (A + 1.0) + (A - 1.0) * cw - 2.0 * sqrtA * alpha
-
         setNorm(b0u: b0u, b1u: b1u, b2u: b2u, a0u: a0u, a1u: a1u, a2u: a2u)
     }
 
@@ -88,12 +82,11 @@ final class Biquad {
         let a0u = (A + 1.0) - (A - 1.0) * cw + 2.0 * sqrtA * alpha
         let a1u = 2.0 * ((A - 1.0) - (A + 1.0) * cw)
         let a2u = (A + 1.0) - (A - 1.0) * cw - 2.0 * sqrtA * alpha
-
         setNorm(b0u: b0u, b1u: b1u, b2u: b2u, a0u: a0u, a1u: a1u, a2u: a2u)
     }
 
     func setNotch(fs: Double, f0: Double, q: Double) {
-        let w0 = 2.0 * Double.pi * (f0 / fs)
+        let w0 = 2.0 * Double.pi * f0 / fs
         let cw = cos(w0)
         let sw = sin(w0)
         let alpha = sw / (2.0 * q)
@@ -109,32 +102,28 @@ final class Biquad {
     }
 }
 
-// MARK: - Eq5Band (Swift port of Eq5Band in DspEq.kt)
-
+// MARK: - Eq5Band
 final class Eq5Band {
     private let fs: Double
-
     private let low = Biquad()
     private let m1  = Biquad()
     private let m2  = Biquad()
     private let m3  = Biquad()
     private let high = Biquad()
 
-    init(fs: Double) {
-        self.fs = fs
-    }
+    init(fs: Double) { self.fs = fs }
 
-    /// db: length 5 (low, m1, m2, m3, high)
+    /// db length=5: [low, m1, m2, m3, high]
     func updateGainsDb(_ db: [Double]) {
         guard db.count >= 5 else { return }
 
-        low.setLowShelf(fs: fs, f0: 60.0,  slope: 1.0, gainDb: db[0])
-        m1.setPeaking(fs: fs,  f0: 230.0, q: 1.0, gainDb: db[1])
-        m2.setPeaking(fs: fs,  f0: 910.0, q: 1.0, gainDb: db[2])
-        m3.setPeaking(fs: fs,  f0: 3600.0, q: 1.0, gainDb: db[3])
+        low.setLowShelf(fs: fs, f0: 60.0, slope: 1.0, gainDb: db[0])
+        m1.setPeaking(fs: fs, f0: 230.0, q: 1.0, gainDb: db[1])
+        m2.setPeaking(fs: fs, f0: 910.0, q: 1.0, gainDb: db[2])
+        m3.setPeaking(fs: fs, f0: 3600.0, q: 1.0, gainDb: db[3])
 
         let nyq = fs * 0.5
-        let fHigh = min(14000.0, nyq * 0.90)
+        let fHigh = min(14_000.0, nyq * 0.90)
         high.setHighShelf(fs: fs, f0: fHigh, slope: 1.0, gainDb: db[4])
     }
 
