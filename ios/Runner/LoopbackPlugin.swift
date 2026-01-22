@@ -1,8 +1,7 @@
 import Flutter
 import UIKit
 import AVFoundation
-
-// MARK: - LoopbackPlugin.swift (iOS version of MainActivity.kt)
+import QuartzCore
 
 public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
@@ -10,12 +9,12 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     private static let CHANNEL = "loopback"
     private static let EVENTS  = "loopback_events"
 
-    // ===== Audio Session/Engine =====
+    // ===== Audio Session / Engine =====
     private let session = AVAudioSession.sharedInstance()
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
 
-    // ===== Thread/State =====
+    // ===== State / Queue =====
     private let audioQueue = DispatchQueue(label: "loopback.audio.queue", qos: .userInteractive)
     private var running: Bool = false
     private var pendingStartToken: Int = 0
@@ -26,14 +25,14 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     // ===== Params from Flutter =====
     private var eqEnabled: Bool = true
     private var outputGain: Double = 1.0
-    private var bandGains: [Double] = [1,1,1,1,1]
+    private var bandGains: [Double] = [1, 1, 1, 1, 1]
     private var masterBoost: Double = 1.0
 
     // ===== INPUT SELECT (best-effort on iOS) =====
     private var preferWiredMic: Bool = false
     private var headsetMicBoost: Double = 3.0
 
-    // ===== Last requested route mode =====
+    // ===== Last route mode =====
     private var lastVoiceModeRequested: Bool = false
     private var lastVoicePath: Bool = false
     private var lastSampleRate: Double = 48_000
@@ -44,24 +43,26 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     private let FEEDBACK_RISE_THRESHOLD: Double = 0.05
     private let GUARD_MIN: Double = 0.03
 
-    private let A2DP_MUTE_MS: Double = 40
+    private let A2DP_MUTE_MS: Double = 40.0
     private let A2DP_HARD_MUTE_RMS: Double = 0.55
 
     // ================== Speaker default voice SR ==================
     private let SPEAKER_VOICE_SR: Double = 48_000
 
-    // ================== A2DP "mixer style" noise/feedback controls ==================
+    // ================== A2DP "mixer style" controls ==================
     private let A2DP_HPF_HZ: Double = 220.0
+
     private let A2DP_AFS_ANALYZE_MS: Double = 100.0
     private let A2DP_DUCK_MS: Double = 450.0
     private let A2DP_EARLY_MUTE_RMS: Double = 0.30
     private let A2DP_EARLY_MUTE_RISE: Double = 0.08
+
     private let A2DP_LPF_HZ: Double = 8500.0
     private let A2DP_GATE_THR: Double = 0.030
     private let A2DP_GATE_ATTACK_MS: Double = 6.0
     private let A2DP_GATE_RELEASE_MS: Double = 140.0
 
-    // ===== DSP objects (Swift ports you should have / will add) =====
+    // ===== DSP =====
     private var eq: Eq5Band?
     private var hpf: OnePoleHpf?
     private var a2dpLpf: OnePoleLpf?
@@ -70,7 +71,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     private var comp: SimpleCompressor?
     private var limiter: SimpleLimiter?
 
-    // ===== Runtime variables (match Android loop) =====
+    // ===== Runtime variables =====
     private var a2dpFlag: Bool = false
     private var lastA2dpCheckTs: Double = 0.0
     private var duckUntilTs: Double = 0.0
@@ -83,8 +84,10 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     // ===== Meter throttle =====
     private var lastMeterTs: Double = 0.0
 
-    // MARK: - FlutterPlugin register
+    // ===== Cached audio format used for output scheduling =====
+    private var monoFormat: AVAudioFormat?
 
+    // MARK: FlutterPlugin register
     public static func register(with registrar: FlutterPluginRegistrar) {
         let inst = LoopbackPlugin()
 
@@ -97,8 +100,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         inst.installNotifications()
     }
 
-    // MARK: - Stream handler
-
+    // MARK: Stream handler
     public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
         self.eventSink = events
         return nil
@@ -109,91 +111,77 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         return nil
     }
 
-    // MARK: - Method handler
-
+    // MARK: Method handler
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-        do {
-            switch call.method {
-            case "start":
-                let args = call.arguments as? [String: Any]
-                let voiceMode = (args?["voiceMode"] as? Bool) ?? false
-                startLoopback(voiceMode: voiceMode)
-                result(nil)
+        switch call.method {
 
-            case "stop":
-                stopLoopback()
-                result(nil)
+        case "start":
+            let args = call.arguments as? [String: Any]
+            let voiceMode = (args?["voiceMode"] as? Bool) ?? false
+            startLoopback(voiceMode: voiceMode)
+            result(nil)
 
-            case "setParams":
-                let args = call.arguments as? [String: Any]
-                let enabled = (args?["eqEnabled"] as? Bool) ?? true
-                let outGain = (args?["outputGain"] as? NSNumber)?.doubleValue ?? 1.0
-                let mBoost  = (args?["masterBoost"] as? NSNumber)?.doubleValue ?? 1.0
-                let list = (args?["bandGains"] as? [NSNumber])?.map { $0.doubleValue } ?? [1,1,1,1,1]
+        case "stop":
+            stopLoopback()
+            result(nil)
 
-                eqEnabled = enabled
-                outputGain = clamp(outGain, 0.0, 6.0)
-                masterBoost = clamp(mBoost, 0.5, 4.0)
+        case "setParams":
+            let args = call.arguments as? [String: Any]
+            let enabled = (args?["eqEnabled"] as? Bool) ?? true
+            let outGain = (args?["outputGain"] as? NSNumber)?.doubleValue ?? 1.0
+            let mBoost  = (args?["masterBoost"] as? NSNumber)?.doubleValue ?? 1.0
+            let list = (args?["bandGains"] as? [NSNumber])?.map { $0.doubleValue } ?? [1,1,1,1,1]
 
-                var arr = [Double](repeating: 1.0, count: 5)
-                for i in 0..<5 {
-                    let v = (i < list.count) ? list[i] : 1.0
-                    arr[i] = clamp(v, 0.25, 3.0)
-                }
-                bandGains = arr
+            eqEnabled = enabled
+            outputGain = clamp(outGain, 0.0, 6.0)
+            masterBoost = clamp(mBoost, 0.5, 4.0)
 
-                audioQueue.async { [weak self] in
-                    self?.applyEqIfChanged(force: true)
-                }
-
-                result(nil)
-
-            case "setPreferWiredMic":
-                let args = call.arguments as? [String: Any]
-                let v = (args?["preferWiredMic"] as? Bool) ?? false
-                let boost = (args?["headsetBoost"] as? NSNumber)?.doubleValue ?? 2.2
-
-                preferWiredMic = v
-                headsetMicBoost = clamp(boost, 1.0, 6.0)
-
-                if running {
-                    handleRouteChanged()
-                }
-                result(nil)
-
-            case "isWiredPresent":
-                result(isWiredPresent())
-
-            case "isBtHeadsetPresent":
-                result(isBtHeadsetWithMicConnected())
-
-            default:
-                result(FlutterMethodNotImplemented)
+            var arr = [Double](repeating: 1.0, count: 5)
+            for i in 0..<5 {
+                let v = (i < list.count) ? list[i] : 1.0
+                arr[i] = clamp(v, 0.25, 3.0)
             }
-        } catch {
-            result(FlutterError(code: "ERR", message: "\(error)", details: nil))
+            bandGains = arr
+
+            audioQueue.async { [weak self] in
+                self?.applyEqIfChanged(force: true)
+            }
+            result(nil)
+
+        case "setPreferWiredMic":
+            let args = call.arguments as? [String: Any]
+            let v = (args?["preferWiredMic"] as? Bool) ?? false
+            let boost = (args?["headsetBoost"] as? NSNumber)?.doubleValue ?? 2.2
+
+            preferWiredMic = v
+            headsetMicBoost = clamp(boost, 1.0, 6.0)
+
+            if running { handleRouteChanged() }
+            result(nil)
+
+        case "isWiredPresent":
+            result(isWiredPresent())
+
+        case "isBtHeadsetPresent":
+            result(isBtHeadsetWithMicConnected())
+
+        default:
+            result(FlutterMethodNotImplemented)
         }
     }
 
-    // MARK: - Start/Stop (maps MainActivity.startLoopback/stopLoopback)
-
+    // MARK: Start/Stop
     private func startLoopback(voiceMode: Bool) {
         stopLoopback()
         pendingStartToken += 1
-
         lastVoiceModeRequested = voiceMode
 
-        // iOS: if voiceMode=true but no BT headset mic -> fallback like Android
+        // iOS: voiceMode=true but no BT mic -> fallback
         if voiceMode && !isBtHeadsetWithMicConnected() {
             startLoopback(voiceMode: false)
             return
         }
 
-        // Decide initial (sampleRate, voicePath) similar logic:
-        // - voiceMode=true -> voicePath=true (HFP) and request 16k
-        // - voiceMode=false:
-        //   + if A2DP output -> voicePath=false, request 48k
-        //   + else speaker default -> voicePath=true, request 48k
         let a2dp = isA2dpOutputActive()
         let wired = isWiredPresent()
 
@@ -222,14 +210,13 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     private func stopLoopback() {
         pendingStartToken += 1
-
         running = false
 
         audioQueue.sync {
-            engine.inputNode.removeTap(onBus: 0)
-            player.stop()
-            engine.stop()
-            engine.reset()
+            self.engine.inputNode.removeTap(onBus: 0)
+            self.player.stop()
+            self.engine.stop()
+            self.engine.reset()
         }
 
         // reset DSP/state
@@ -248,12 +235,12 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         afs = nil
         comp = nil
         limiter = nil
+        monoFormat = nil
 
         try? session.setActive(false, options: [.notifyOthersOnDeactivation])
     }
 
-    // MARK: - Engine setup (maps MainActivity.startEngine)
-
+    // MARK: Engine setup
     private func configureAndStart(sampleRate: Double, voicePath: Bool, token: Int) {
         guard token == pendingStartToken else { return }
 
@@ -263,11 +250,9 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         // Update flags
         a2dpFlag = (!voicePath) && isA2dpOutputActive() && !isWiredPresent()
 
-        // Session config = iOS equivalent of AudioManager.mode + route logic
         do {
             try configureSession(voicePath: voicePath, sampleRate: sampleRate)
         } catch {
-            // fallback safe
             try? configureSession(voicePath: false, sampleRate: 48_000)
         }
 
@@ -275,29 +260,30 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
             guard let self else { return }
             guard token == self.pendingStartToken else { return }
 
-            // Build graph: input tap -> process -> player -> mainMixer
             if !self.engine.attachedNodes.contains(self.player) {
                 self.engine.attach(self.player)
             }
 
             let input = self.engine.inputNode
             let inputFormat = input.outputFormat(forBus: 0)
-
-            // Use mono float32 processing
             let fs = inputFormat.sampleRate
+
+            // mono float32 format used for processing & playback
             let mono = AVAudioFormat(commonFormat: .pcmFormatFloat32,
-                                    sampleRate: fs,
-                                    channels: 1,
-                                    interleaved: false)!
+                                     sampleRate: fs,
+                                     channels: 1,
+                                     interleaved: false)!
+            self.monoFormat = mono
 
             self.engine.connect(self.player, to: self.engine.mainMixerNode, format: mono)
 
-            // Create DSP
             self.buildDsp(sampleRate: fs)
 
-            // Tap
             input.removeTap(onBus: 0)
-            let tapFrames = AVAudioFrameCount(max(128, min(1024, Int(fs / 100)))) // ~10ms
+
+            // ~10ms tap (like Android chunk-ish). Keep safe bounds.
+            let tapFrames = AVAudioFrameCount(max(128, min(1024, Int(fs / 100.0))))
+
             input.installTap(onBus: 0, bufferSize: tapFrames, format: inputFormat) { [weak self] buf, _ in
                 self?.processTap(buffer: buf, voicePath: voicePath)
             }
@@ -314,33 +300,40 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     private func configureSession(voicePath: Bool, sampleRate: Double) throws {
         // iOS mapping:
-        // - voicePath=true -> mode .voiceChat (better AEC) (like VOICE_COMMUNICATION)
-        // - voicePath=false -> mode .default, allow A2DP
+        // voicePath=true  -> .voiceChat (AEC best-effort)
+        // voicePath=false -> .default + allow A2DP
         var options: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .allowBluetooth]
-        if !voicePath {
-            options.insert(.allowBluetoothA2DP)
-        }
+        if !voicePath { options.insert(.allowBluetoothA2DP) }
 
-        try session.setCategory(.playAndRecord, mode: voicePath ? .voiceChat : .default, options: options)
+        try session.setCategory(.playAndRecord,
+                                mode: voicePath ? .voiceChat : .default,
+                                options: options)
         try session.setPreferredSampleRate(sampleRate)
         try session.setPreferredIOBufferDuration(0.01) // ~10ms
         try session.setActive(true, options: [])
     }
 
     private func buildDsp(sampleRate fs: Double) {
-        // Create DSP instances (Swift ports)
         eq = Eq5Band(fs: fs)
         hpf = OnePoleHpf(fs: fs, fc: A2DP_HPF_HZ)
         a2dpLpf = OnePoleLpf(fs: fs, fc: A2DP_LPF_HZ)
-        gate = SimpleGate(sampleRate: fs, threshold: A2DP_GATE_THR, attackMs: A2DP_GATE_ATTACK_MS, releaseMs: A2DP_GATE_RELEASE_MS)
+        gate = SimpleGate(sampleRate: fs,
+                          threshold: A2DP_GATE_THR,
+                          attackMs: A2DP_GATE_ATTACK_MS,
+                          releaseMs: A2DP_GATE_RELEASE_MS)
         afs = AntiFeedbackAfs(fs: fs)
-        comp = SimpleCompressor(sampleRate: fs, threshold: 0.28, ratio: 2.5, attackMs: 8.0, releaseMs: 180.0)
-        limiter = SimpleLimiter(sampleRate: fs, threshold: 0.92, releaseMs: 120.0)
+        comp = SimpleCompressor(sampleRate: fs,
+                                threshold: 0.28,
+                                ratio: 2.5,
+                                attackMs: 8.0,
+                                releaseMs: 180.0)
+        limiter = SimpleLimiter(sampleRate: fs,
+                                threshold: 0.92,
+                                releaseMs: 120.0)
 
         afs?.reset()
         limiter?.reset()
 
-        // reset loop state
         guardGain = 1.0
         lastRms = 0.0
         duckUntilTs = 0.0
@@ -350,17 +343,18 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         applyEqIfChanged(force: true)
     }
 
-    // MARK: - Processing loop (maps Kotlin while(running){read->process->write})
-
+    // MARK: Processing loop
     private func processTap(buffer: AVAudioPCMBuffer, voicePath: Bool) {
         guard running else { return }
-        guard let inData = buffer.floatChannelData?[0] else { return }
+
+        // Convert whatever input channels -> mono by taking channel 0 (like Android MONO record)
+        guard let ch0 = buffer.floatChannelData?[0] else { return }
         let n = Int(buffer.frameLength)
         if n <= 0 { return }
 
         let now = nowMs()
 
-        // A2DP flag check (like 500ms in Android)
+        // A2DP flag check (500ms)
         if (now - lastA2dpCheckTs) > 500 {
             lastA2dpCheckTs = now
             let newFlag = (!voicePath) && isA2dpOutputActive() && !isWiredPresent()
@@ -378,16 +372,15 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         // raw RMS for AFS decision
         var rawSumSq: Double = 0
         for i in 0..<n {
-            let xf = Double(inData[i])
+            let xf = Double(ch0[i])
             rawSumSq += xf * xf
         }
         let rawRms = sqrt(rawSumSq / Double(n)).clamp01()
 
-        // Analyze (AFS) each A2DP_AFS_ANALYZE_MS
+        // AFS analyze
         if a2dpFlag && rawRms > 0.018 && (now - lastAnalyzeTs) >= A2DP_AFS_ANALYZE_MS {
             lastAnalyzeTs = now
-            // IMPORTANT: implement analyzeFloat(...) in AntiFeedbackAfs.swift to avoid int16 conversion
-            afs?.analyzeFloat(input: inData, count: n)
+            afs?.analyzeFloat(input: ch0, count: n)
         }
 
         let duckNow = a2dpFlag && (now < duckUntilTs)
@@ -399,15 +392,14 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         let isSpeakerDefaultNow = voicePath && !isWiredPresent() && !isA2dpOutputActive() && !a2dpFlag
         let speakerDefaultBoost = (isSpeakerDefaultNow && !a2dpFlag) ? 1.35 : 1.0
 
-        // iOS can’t truly force wired mic; keep behavior knob best-effort:
+        // iOS can't truly force mic device from app code; keep knob best-effort
         let micBoost = (preferWiredMic ? headsetMicBoost : 1.0)
 
         let gCap = a2dpFlag ? min(gRaw, A2DP_SAFE_GAIN_CAP) : gRaw
         let combinedGain = (gCap * mBoost * speakerDefaultBoost) * guardGain * micBoost
 
-        // Prepare output buffer (mono float32)
-        let outFormat = player.outputFormat(forBus: 0)
-        let outBuf = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: AVAudioFrameCount(n))!
+        guard let mono = monoFormat else { return }
+        let outBuf = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: AVAudioFrameCount(n))!
         outBuf.frameLength = AVAudioFrameCount(n)
         guard let outData = outBuf.floatChannelData?[0] else { return }
 
@@ -415,7 +407,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
         if eqEnabled {
             for i in 0..<n {
-                var x = Double(inData[i])
+                var x = Double(ch0[i])
 
                 x = eq?.process(x) ?? x
                 if !x.isFinite { x = 0 }
@@ -435,13 +427,13 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
                 x = limiter?.process(x) ?? x
                 x = softClip(x)
 
-                let y = x.clamp(-1, 1)
+                let y = x.clamp(-1.0, 1.0)
                 outData[i] = Float(y)
                 sumSq += y * y
             }
         } else {
             for i in 0..<n {
-                var x = Double(inData[i])
+                var x = Double(ch0[i])
 
                 if a2dpFlag {
                     x = hpf?.process(x) ?? x
@@ -458,7 +450,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
                 x = limiter?.process(x) ?? x
                 x = softClip(x)
 
-                let y = x.clamp(-1, 1)
+                let y = x.clamp(-1.0, 1.0)
                 outData[i] = Float(y)
                 sumSq += y * y
             }
@@ -484,11 +476,10 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
             if earlyMute || hardMute {
                 let muteMs = hardMute ? A2DP_MUTE_MS : (A2DP_MUTE_MS / 2.0)
-                let muteSamples = min(n, max(1, Int(outFormat.sampleRate * (muteMs / 1000.0))))
+                let muteSamples = min(n, max(1, Int(mono.sampleRate * (muteMs / 1000.0))))
                 for i in 0..<muteSamples { outData[i] = 0 }
             }
 
-            // log throttled (optional)
             if (now - lastGuardLogTs) > 1000 {
                 lastGuardLogTs = now
                 // print("A2DP guard rms=\(rmsNow) guardGain=\(guardGain) notch=\(afs?.activeCount() ?? 0)")
@@ -505,16 +496,15 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
             }
         }
 
-        // Schedule output
+        // Output
         player.scheduleBuffer(outBuf, completionHandler: nil)
     }
 
-    // MARK: - EQ refresh logic (maps refreshEqIfChanged)
-
+    // MARK: EQ refresh logic
     private var lastEqEnabled: Bool = true
     private var lastGain: Double = 1.0
     private var lastMaster: Double = 1.0
-    private var lastBands: [Double] = [1,1,1,1,1]
+    private var lastBands: [Double] = [1, 1, 1, 1, 1]
 
     private func applyEqIfChanged(force: Bool) {
         guard let eq = self.eq else { return }
@@ -551,21 +541,21 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
         lastBands = bb
 
-        // linear gain -> dB: 20*log10(g)
+        // linear -> dB
         var db = [Double](repeating: 0, count: 5)
         for i in 0..<5 {
             let gi = max(0.0001, bb[i])
             db[i] = 20.0 * log10(gi)
         }
-        eq.updateGainsDb(db: db)
+
+        // ✅ call signature đúng
+        eq.updateGainsDb(db)
     }
 
-    // MARK: - Route change (maps AudioDeviceCallback + restartEngineAuto)
-
+    // MARK: Route change
     private func handleRouteChanged() {
         guard running else { return }
 
-        // Decide target route again similar to startLoopback(auto)
         let voiceMode = lastVoiceModeRequested
         let a2dp = isA2dpOutputActive()
         let wired = isWiredPresent()
@@ -608,17 +598,16 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         running = false
 
         audioQueue.sync {
-            engine.inputNode.removeTap(onBus: 0)
-            player.stop()
-            engine.stop()
-            engine.reset()
+            self.engine.inputNode.removeTap(onBus: 0)
+            self.player.stop()
+            self.engine.stop()
+            self.engine.reset()
         }
 
         configureAndStart(sampleRate: sampleRate, voicePath: voicePath, token: token)
     }
 
-    // MARK: - Notifications (route/interruption)
-
+    // MARK: Notifications
     private func installNotifications() {
         NotificationCenter.default.addObserver(
             self,
@@ -654,8 +643,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         NotificationCenter.default.removeObserver(self)
     }
 
-    // MARK: - Route helpers (iOS equivalents of findWired/findBtA2dp/isBtHeadsetWithMicConnected)
-
+    // MARK: Route helpers
     private func isA2dpOutputActive() -> Bool {
         for o in session.currentRoute.outputs {
             if o.portType == .bluetoothA2DP { return true }
@@ -676,29 +664,21 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     private func isBtHeadsetWithMicConnected() -> Bool {
         let r = session.currentRoute
-        // closest match to SCO/BLE_HEADSET = bluetoothHFP (has mic)
         for i in r.inputs where i.portType == .bluetoothHFP { return true }
         return false
     }
 
-    // MARK: - Math helpers
-
+    // MARK: Helpers
     private func softClip(_ x: Double) -> Double {
-        // Same stub as Kotlin:
-        // a=1.5; ax=a*x; return ax/(1+abs(ax))
+        // Kotlin stub: a=1.5; ax=a*x; return ax/(1+abs(ax))
         let a = 1.5
         let ax = a * x
         return ax / (1.0 + abs(ax))
     }
 
     private func nowMs() -> Double { CACurrentMediaTime() * 1000.0 }
-
-    private func clamp(_ x: Double, _ lo: Double, _ hi: Double) -> Double {
-        min(hi, max(lo, x))
-    }
+    private func clamp(_ x: Double, _ lo: Double, _ hi: Double) -> Double { min(hi, max(lo, x)) }
 }
-
-// MARK: - Tiny helpers
 
 fileprivate extension Double {
     func clamp(_ lo: Double, _ hi: Double) -> Double { min(hi, max(lo, self)) }
