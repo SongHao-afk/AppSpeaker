@@ -4,6 +4,7 @@ package com.example.flutter_application_3
 import kotlin.math.*
 
 internal class AntiFeedbackAfs(private val fs: Double) {
+
   private val candidates = doubleArrayOf(
     2000.0, 2500.0, 3150.0, 4000.0, 5000.0, 6300.0, 8000.0, 10000.0
   )
@@ -52,13 +53,17 @@ internal class AntiFeedbackAfs(private val fs: Double) {
       }
     }
 
-    if (bestK < 0 || bestScore < 6.0) return
+    // ================== ✅ FIX #1: chống bắt noise / room tone ==================
+    if (bestK < 0) return
+    if (bestScore < 10.0) return      // ⬅️ nâng threshold (trước: 6.0)
+    if (e[bestK] < 5e-6) return       // ⬅️ energy floor
+    // ===========================================================================
 
     val f0 = candidates[bestK]
 
     for (i in notch.indices) {
       if (notchF[i] > 0.0 && abs(notchF[i] - f0) < 120.0 && now < notchUntil[i]) {
-        notchUntil[i] = now + 1200L
+        notchUntil[i] = now + 700L    // ⬅️ FIX #2: giảm hold (trước: 1200ms)
         return
       }
     }
@@ -71,7 +76,7 @@ internal class AntiFeedbackAfs(private val fs: Double) {
 
     notchF[slot] = f0
     notch[slot].setNotch(fs, f0, Q)
-    notchUntil[slot] = now + 1200L
+    notchUntil[slot] = now + 700L     // ⬅️ FIX #2
   }
 
   fun process(xIn: Double): Double {
@@ -100,7 +105,7 @@ internal class AntiFeedbackAfs(private val fs: Double) {
       s0 = x + coeff * s1 - s2
       s2 = s1
       s1 = s0
-      i += 2
+      i += 1
     }
 
     val power = s1 * s1 + s2 * s2 - coeff * s1 * s2

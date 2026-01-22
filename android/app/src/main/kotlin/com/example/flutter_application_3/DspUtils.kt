@@ -3,7 +3,7 @@ package com.example.flutter_application_3
 
 import kotlin.math.*
 
-internal fun softClip(xIn: Double): Double {
+internal fun softClipCubic(xIn: Double): Double {
   if (!xIn.isFinite()) return 0.0
   var x = xIn
   if (x > 2.5) x = 2.5
