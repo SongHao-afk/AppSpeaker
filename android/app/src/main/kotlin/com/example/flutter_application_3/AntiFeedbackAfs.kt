@@ -1,20 +1,24 @@
-// AntiFeedbackAfs.kt
+// AntiFeedbackAfs.kt (FIXED: less false-positive on voice, 2-notch only)
 package com.example.flutter_application_3
 
 import kotlin.math.*
 
 internal class AntiFeedbackAfs(private val fs: Double) {
 
+  // Keep candidates (speech-formant heavy zones still possible, but we harden detection)
   private val candidates = doubleArrayOf(
     2000.0, 2500.0, 3150.0, 4000.0, 5000.0, 6300.0, 8000.0, 10000.0
   )
 
-  private val notch = Array(4) { Biquad() }
-  private val notchF = DoubleArray(4) { 0.0 }
-  private val notchUntil = LongArray(4) { 0L }
+  // ✅ FIX: fewer notches -> less "boxy/roomy" artifacts
+  private val notch = Array(2) { Biquad() }
+  private val notchF = DoubleArray(notch.size) { 0.0 }
+  private val notchUntil = LongArray(notch.size) { 0L }
 
-  private val Q = 10.0
+  // Slightly wider notch (lower Q) reduces harsh ringing, still effective
+  private val Q = 8.0
 
+  // EMA baseline for each candidate
   private val ema = DoubleArray(candidates.size) { 1e-6 }
   private val emaAlpha = 0.90
 
@@ -53,21 +57,25 @@ internal class AntiFeedbackAfs(private val fs: Double) {
       }
     }
 
-    // ================== ✅ FIX #1: chống bắt noise / room tone ==================
     if (bestK < 0) return
-    if (bestScore < 10.0) return      // ⬅️ nâng threshold (trước: 6.0)
-    if (e[bestK] < 5e-6) return       // ⬅️ energy floor
-    // ===========================================================================
+
+    // ✅ HARDEN: avoid catching normal speech peaks / room tone
+    // - Raise score threshold (voice often triggers 8~12 on boosted mic)
+    // - Raise absolute energy floor (only notch when truly loud)
+    if (bestScore < 14.0) return
+    if (e[bestK] < 1.2e-5) return
 
     val f0 = candidates[bestK]
 
+    // If same freq already active, just extend a bit (short hold to avoid "stuck notch")
     for (i in notch.indices) {
-      if (notchF[i] > 0.0 && abs(notchF[i] - f0) < 120.0 && now < notchUntil[i]) {
-        notchUntil[i] = now + 700L    // ⬅️ FIX #2: giảm hold (trước: 1200ms)
+      if (notchF[i] > 0.0 && abs(notchF[i] - f0) < 140.0 && now < notchUntil[i]) {
+        notchUntil[i] = now + 650L
         return
       }
     }
 
+    // Find free slot
     var slot = -1
     for (i in notch.indices) {
       if (now >= notchUntil[i]) { slot = i; break }
@@ -76,7 +84,7 @@ internal class AntiFeedbackAfs(private val fs: Double) {
 
     notchF[slot] = f0
     notch[slot].setNotch(fs, f0, Q)
-    notchUntil[slot] = now + 700L     // ⬅️ FIX #2
+    notchUntil[slot] = now + 650L
   }
 
   fun process(xIn: Double): Double {

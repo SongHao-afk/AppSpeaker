@@ -1,4 +1,4 @@
-// DspUtils.kt
+// DspUtils.kt (ADDED: SimpleLimiter for safer A2DP loudness)
 package com.example.flutter_application_3
 
 import kotlin.math.*
@@ -61,5 +61,30 @@ internal class SimpleCompressor(
     val gain = (over).pow((1.0 / rat) - 1.0)
     x *= gain
     return x
+  }
+}
+
+// ✅ ADDED: true limiter to prevent A2DP peak blow-up (reduces squeal/harsh feedback)
+internal class SimpleLimiter(
+  sampleRate: Double,
+  ceiling: Double = 0.90,
+  attackMs: Double = 1.2,
+  releaseMs: Double = 140.0
+) {
+  private val ceil = ceiling.coerceIn(0.2, 0.98)
+  private val atk = exp(-1.0 / (sampleRate * (attackMs / 1000.0)).coerceAtLeast(1e-6))
+  private val rel = exp(-1.0 / (sampleRate * (releaseMs / 1000.0)).coerceAtLeast(1e-6))
+  private var g = 1.0
+
+  fun reset() { g = 1.0 }
+
+  fun process(xIn: Double): Double {
+    val a = abs(xIn)
+    val need = if (a > ceil) (ceil / (a + 1e-12)) else 1.0
+
+    g = if (need < g) atk * g + (1.0 - atk) * need
+    else rel * g + (1.0 - rel) * need
+
+    return xIn * g
   }
 }
