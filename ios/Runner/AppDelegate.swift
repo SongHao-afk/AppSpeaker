@@ -10,7 +10,6 @@ import Flutter
 
     // Flutter plugins (pub.dev)
     GeneratedPluginRegistrant.register(with: self)
-
     // ✅ Register LoopbackPlugin (custom)
     if let controller = window?.rootViewController as? FlutterViewController,
        let registrar = controller.registrar(forPlugin: "LoopbackPlugin") {
