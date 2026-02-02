@@ -1,4 +1,3 @@
-
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 /// Class quản lý foreground service để app chạy nền
