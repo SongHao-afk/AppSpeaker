@@ -64,10 +64,11 @@ class MainActivity : FlutterActivity() {
   // ===== INPUT SELECT (ADDED) =====
   @Volatile private var preferWiredMic: Boolean = false
   @Volatile private var headsetMicBoost: Double = 3.0
+  @Volatile private var bluetoothMicBoost: Double = 6.5
 
   // ================== ✅ Anti-feedback tuning for A2DP ==================
   // ✅ PATCH: hạ cap chút để bớt hú + bớt “vang chói”
-  private val A2DP_SAFE_GAIN_CAP = 0.45
+  private val A2DP_SAFE_GAIN_CAP = 0.70
 
   private val FEEDBACK_RMS_THRESHOLD = 0.20
   private val FEEDBACK_RISE_THRESHOLD = 0.045
@@ -101,6 +102,11 @@ class MainActivity : FlutterActivity() {
   private val A2DP_MONITOR_MIN = 0.28      // khi nói -> hạ monitor xuống mức này
   private val A2DP_MONITOR_ATTACK = 0.12   // hạ nhanh
   private val A2DP_MONITOR_RELEASE = 0.008 // hồi chậm
+
+  // ✅ ADDED: effective values (để mic không bị đè quá nhỏ khi nói trên A2DP)
+  // Không xoá/sửa các constant cũ; chỉ dùng "effective" trong loop
+  private val A2DP_TALK_RMS_EFFECTIVE = 0.030
+  private val A2DP_MONITOR_MIN_EFFECTIVE = 0.60
   // ====================================================================
 
   // ================== ✅ FIX: robust BT headset (HFP/HSP) detection via profile proxy ==================
@@ -242,6 +248,51 @@ class MainActivity : FlutterActivity() {
   }
   // =====================================================================================================
 
+  // ===================== ✅ ADDED: Audio Focus (duck YouTube/music so mic is audible) =====================
+  private var focusRequest: AudioFocusRequest? = null
+
+  private fun requestFocusForMic() {
+    try {
+      if (Build.VERSION.SDK_INT >= 26) {
+        val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+          .setAudioAttributes(
+            AudioAttributes.Builder()
+              .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+              .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+              .build()
+          )
+          .setOnAudioFocusChangeListener { /* ignore */ }
+          .build()
+        focusRequest = req
+        val r = audioManager.requestAudioFocus(req)
+        Log.d(TAG, "audioFocus request -> $r")
+      } else {
+        @Suppress("DEPRECATION")
+        val r = audioManager.requestAudioFocus(
+          null,
+          AudioManager.STREAM_MUSIC,
+          AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+        )
+        Log.d(TAG, "audioFocus request(legacy) -> $r")
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "requestFocusForMic fail: ${e.message}")
+    }
+  }
+
+  private fun abandonFocus() {
+    try {
+      if (Build.VERSION.SDK_INT >= 26) {
+        focusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+        focusRequest = null
+      } else {
+        @Suppress("DEPRECATION")
+        audioManager.abandonAudioFocus(null)
+      }
+    } catch (_: Exception) {}
+  }
+  // =====================================================================================================
+
   override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
     super.configureFlutterEngine(flutterEngine)
     audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -281,11 +332,13 @@ class MainActivity : FlutterActivity() {
             "setPreferWiredMic" -> {
               val v = call.argument<Boolean>("preferWiredMic") ?: false
               val boost = (call.argument<Number>("headsetBoost") ?: 2.2).toDouble()
+              val btBoost = (call.argument<Number>("bluetoothBoost") ?: 4.5).toDouble()
 
               preferWiredMic = v
               headsetMicBoost = boost.coerceIn(1.0, 6.0)
+              bluetoothMicBoost = btBoost.coerceIn(1.0, 8.0)
 
-              Log.d(TAG, "setPreferWiredMic=$preferWiredMic headsetBoost=$headsetMicBoost running=$running")
+              Log.d(TAG, "setPreferWiredMic=$preferWiredMic headsetBoost=$headsetMicBoost btBoost=$bluetoothMicBoost running=$running")
 
               if (running) handleRouteChanged()
               result.success(null)
@@ -554,6 +607,7 @@ class MainActivity : FlutterActivity() {
     val wiredOut = findWiredOutput()
     val wiredIn = findWiredInput()
     val usingWiredMic = (wiredIn != null && preferWiredMic)
+    val usingBtMic = voicePath && isBtHeadsetWithMicConnected()
 
     val wiredPresent = (!voicePath) && (wiredOut != null || wiredIn != null)
     val isWiredOutNow = (!voicePath) && (wiredOut != null)
@@ -618,11 +672,16 @@ class MainActivity : FlutterActivity() {
       } catch (_: Exception) {}
     }
 
-    if (voicePath || forceVoiceCommForA2dp || usingWiredMic) {
+    // ===================== ✅ PATCH: A2DP clean audio (disable AGC/AEC/NS on A2DP) =====================
+    // A2DP loopback + built-in mic rất hay bị "rè/bẩn" do AGC/AEC/NS (tuỳ ROM).
+    // Nên: chỉ bật FX cho voicePath / wired mic; còn A2DP thì release hết để sạch.
+    val enableFx = (voicePath || usingWiredMic) && !isA2dpOutNow
+    if (enableFx) {
       try { aec = AcousticEchoCanceler.create(recorder?.audioSessionId ?: 0); aec?.enabled = true } catch (_: Exception) { aec = null }
       try { ns = NoiseSuppressor.create(recorder?.audioSessionId ?: 0); ns?.enabled = true } catch (_: Exception) { ns = null }
       try { agc = AutomaticGainControl.create(recorder?.audioSessionId ?: 0); agc?.enabled = true } catch (_: Exception) { agc = null }
     } else {
+      // A2DP path (or other cases): release to avoid distortion
       try { aec?.release() } catch (_: Exception) {}
       aec = null
       try { agc?.release() } catch (_: Exception) {}
@@ -630,6 +689,7 @@ class MainActivity : FlutterActivity() {
       try { ns?.release() } catch (_: Exception) {}
       ns = null
     }
+    // =================================================================================================
 
     val attrs = AudioAttributes.Builder()
       .setUsage(if (voicePath) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_MEDIA)
@@ -659,11 +719,15 @@ class MainActivity : FlutterActivity() {
       }
     } catch (_: Exception) {}
 
+    // ✅ ADDED: request audio focus to duck other music (e.g., YouTube)
+    requestFocusForMic()
+
     // ✅ PATCH: đừng boost AudioTrack quá tay (A2DP chỉ bump nhẹ)
     if (isWiredOutNow) {
       try { player?.setVolume(2.0f) } catch (_: Exception) {}
     } else if (isA2dpOutNow) {
-      try { player?.setVolume(1.05f) } catch (_: Exception) {}
+      // lower slightly to reduce initial feedback loudness
+      try { player?.setVolume(0.95f) } catch (_: Exception) {}
     } else {
       try { player?.setVolume(1.0f) } catch (_: Exception) {}
     }
@@ -693,12 +757,14 @@ class MainActivity : FlutterActivity() {
       releaseMs = 180.0
     )
 
+    // ===================== ✅ PATCH: cleaner limiter for A2DP =====================
     val limiter = SimpleLimiter(
       sampleRate = effectiveSampleRate.toDouble(),
-      ceiling = 0.90,
-      attackMs = 1.2,
-      releaseMs = 140.0
+      ceiling = 0.86,   // sạch hơn, ít bể/harsh
+      attackMs = 0.8,   // bắt peak nhanh hơn
+      releaseMs = 180.0 // nhả chậm hơn chút để đỡ "rè"
     )
+    // ============================================================================
 
     running = true
     thread = Thread {
@@ -707,7 +773,13 @@ class MainActivity : FlutterActivity() {
       val rec = recorder ?: return@Thread
       val out = player ?: return@Thread
 
-      val chunkSize = min(recBufSize, playBufSize) / 3
+      // ===================== ✅ PATCH: bigger chunk on A2DP to reduce underrun crackle =====================
+      val baseChunk = min(recBufSize, playBufSize)
+      val chunkSize = maxOf(
+        960,
+        if (isA2dpOutNow) (baseChunk / 2) else (baseChunk / 3)
+      )
+      // ====================================================================================================
       val buf = ShortArray(chunkSize)
 
       var lastEqEnabled = eqEnabled
@@ -764,6 +836,17 @@ class MainActivity : FlutterActivity() {
 
       rec.startRecording()
 
+      // If A2DP is active at start, apply an initial conservative guard/duck
+      // to avoid an immediate loud feedback burst while routes stabilize.
+      if (a2dpFlag) {
+        try {
+          guardGain = 0.18 // start muted-ish, then the guard logic will relax it
+          monitorGain = A2DP_MONITOR_MIN_EFFECTIVE
+          duckUntilTs = System.currentTimeMillis() + 1200L // duck for ~1.2s
+          Log.w(TAG, "A2DP start: applied initial guard/duck to avoid startup feedback")
+        } catch (_: Exception) {}
+      }
+
       val preBufChunks = 2
       val silenceBuf = ShortArray(chunkSize) { 0 }
       for (i in 0 until preBufChunks) {
@@ -787,9 +870,10 @@ class MainActivity : FlutterActivity() {
         val gateBypass = rawRms < 0.010
 
         // ✅ PATCH: A2DP sidetone suppression: nói thì giảm monitor để khỏi "vang"
+        // ✅ ADDED: use EFFECTIVE thresholds so mic isn't reduced too much
         if (a2dpFlag) {
-          val talking = rawRms > A2DP_TALK_RMS
-          val target = if (talking) A2DP_MONITOR_MIN else 1.0
+          val talking = rawRms > A2DP_TALK_RMS_EFFECTIVE
+          val target = if (talking) A2DP_MONITOR_MIN_EFFECTIVE else 1.0
           val k = if (talking) A2DP_MONITOR_ATTACK else A2DP_MONITOR_RELEASE
           monitorGain += (target - monitorGain) * k
         } else {
@@ -816,7 +900,17 @@ class MainActivity : FlutterActivity() {
         val en = lastEqEnabled
         val gRaw = lastGain
 
-        val micBoost = if (usingWiredMic) headsetMicBoost else 1.0
+        // ✅ FIX: bluetoothMicBoost trước đây chỉ ăn khi voicePath=true (SCO).
+        // ✅ ADDED: a2dpMicBoost để boost cho A2DP + built-in mic (case bạn đang dùng loa Bluetooth A2DP).
+        // ✅ PATCH: clamp boost để khỏi clip -> rè/bẩn
+        val a2dpMicBoost = if (a2dpFlag && isBuiltInMicNow) min(bluetoothMicBoost, 3.2) else 1.0
+
+        val micBoost = when {
+          usingWiredMic -> headsetMicBoost
+          usingBtMic -> bluetoothMicBoost
+          else -> 1.0
+        } * a2dpMicBoost
+
         val g = if (a2dpFlag) min(gRaw, A2DP_SAFE_GAIN_CAP) else gRaw
 
         // ✅ PATCH: áp monitorGain vào output
@@ -853,7 +947,12 @@ class MainActivity : FlutterActivity() {
             if (a2dpFlag) x = comp.process(x)
             if (a2dpFlag) x = limiter.process(x)
 
-            x = softClip(x)
+            // ===================== ✅ PATCH: stop constant softclip (causes "rè") =====================
+            // Chỉ softclip khi overflow thực sự, bình thường để limiter xử lý -> sạch hơn
+            if (abs(x) > 1.02) {
+              x = if (a2dpFlag) softClipCubic(x) else softClip(x)
+            }
+            // ========================================================================
 
             val y = (x * 32767.0).roundToInt().coerceIn(-32768, 32767).toShort()
             buf[i] = y
@@ -877,7 +976,11 @@ class MainActivity : FlutterActivity() {
             if (a2dpFlag) x = comp.process(x)
             if (a2dpFlag) x = limiter.process(x)
 
-            x = softClip(x)
+            // ===================== ✅ PATCH: stop constant softclip (causes "rè") =====================
+            if (abs(x) > 1.02) {
+              x = if (a2dpFlag) softClipCubic(x) else softClip(x)
+            }
+            // ========================================================================
 
             val y = (x * 32767.0).roundToInt().coerceIn(-32768, 32767).toShort()
             buf[i] = y
@@ -989,6 +1092,9 @@ class MainActivity : FlutterActivity() {
     safeStopSco()
     safeSetModeNormal()
     try { audioManager.isSpeakerphoneOn = false } catch (_: Exception) {}
+
+    // ✅ ADDED: release audio focus so other music can restore
+    abandonFocus()
   }
 
   private fun safeStopSco() {
@@ -1232,7 +1338,7 @@ class MainActivity : FlutterActivity() {
       else rel * g + (1.0 - rel) * need
 
       return xIn * g
-        }
+    }
   }
 
   // ===================== ✅ SoftClip (nếu chưa có trong file) =====================
@@ -1242,5 +1348,3 @@ class MainActivity : FlutterActivity() {
     return tanh(k * x) / tanh(k)
   }
 }
-
-

@@ -38,10 +38,11 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     private var lastSampleRate: Double = 48_000
 
     // ================== Anti-feedback tuning for A2DP ==================
-    private let A2DP_SAFE_GAIN_CAP: Double = 0.55
-    private let FEEDBACK_RMS_THRESHOLD: Double = 0.22
-    private let FEEDBACK_RISE_THRESHOLD: Double = 0.05
-    private let GUARD_MIN: Double = 0.03
+    // ✅ FIX: match safer Android-ish values
+    private let A2DP_SAFE_GAIN_CAP: Double = 0.45
+    private let FEEDBACK_RMS_THRESHOLD: Double = 0.20
+    private let FEEDBACK_RISE_THRESHOLD: Double = 0.045
+    private let GUARD_MIN: Double = 0.05
 
     private let A2DP_MUTE_MS: Double = 40.0
     private let A2DP_HARD_MUTE_RMS: Double = 0.55
@@ -347,7 +348,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     private func processTap(buffer: AVAudioPCMBuffer, voicePath: Bool) {
         guard running else { return }
 
-        // Convert whatever input channels -> mono by taking channel 0 (like Android MONO record)
         guard let ch0 = buffer.floatChannelData?[0] else { return }
         let n = Int(buffer.frameLength)
         if n <= 0 { return }
@@ -377,7 +377,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         }
         let rawRms = sqrt(rawSumSq / Double(n)).clamp01()
 
-        // AFS analyze
+        // ✅ AFS analyze (Float direct)
         if a2dpFlag && rawRms > 0.018 && (now - lastAnalyzeTs) >= A2DP_AFS_ANALYZE_MS {
             lastAnalyzeTs = now
             afs?.analyzeFloat(input: ch0, count: n)
@@ -392,7 +392,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         let isSpeakerDefaultNow = voicePath && !isWiredPresent() && !isA2dpOutputActive() && !a2dpFlag
         let speakerDefaultBoost = (isSpeakerDefaultNow && !a2dpFlag) ? 1.35 : 1.0
 
-        // iOS can't truly force mic device from app code; keep knob best-effort
         let micBoost = (preferWiredMic ? headsetMicBoost : 1.0)
 
         let gCap = a2dpFlag ? min(gRaw, A2DP_SAFE_GAIN_CAP) : gRaw
@@ -464,11 +463,12 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
             if tooLoud || risingFast { duckUntilTs = now + A2DP_DUCK_MS }
 
+            // ✅ FIX: smoother guard like Android
             if tooLoud || risingFast {
-                guardGain *= 0.70
+                guardGain *= 0.78
                 if guardGain < GUARD_MIN { guardGain = GUARD_MIN }
             } else {
-                guardGain += (1.0 - guardGain) * 0.001
+                guardGain += (1.0 - guardGain) * 0.004
             }
 
             let earlyMute = (rmsNow > A2DP_EARLY_MUTE_RMS) || ((rmsNow - lastRms) > A2DP_EARLY_MUTE_RISE)
@@ -496,7 +496,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
             }
         }
 
-        // Output
         player.scheduleBuffer(outBuf, completionHandler: nil)
     }
 
@@ -525,14 +524,12 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
         var bb = bandGains
 
-        // speaker default: limit highs
         let speakerDefaultNow = lastVoicePath && !isWiredPresent() && !isA2dpOutputActive() && !a2dpFlag
         if speakerDefaultNow {
             bb[3] = min(bb[3], 1.25)
             bb[4] = min(bb[4], 1.35)
         }
 
-        // a2dp: limit treble
         if a2dpFlag {
             bb[2] = min(bb[2], 1.05)
             bb[3] = min(bb[3], 1.10)
@@ -541,14 +538,12 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
         lastBands = bb
 
-        // linear -> dB
         var db = [Double](repeating: 0, count: 5)
         for i in 0..<5 {
             let gi = max(0.0001, bb[i])
             db[i] = 20.0 * log10(gi)
         }
 
-        // ✅ call signature đúng
         eq.updateGainsDb(db)
     }
 
@@ -670,7 +665,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     // MARK: Helpers
     private func softClip(_ x: Double) -> Double {
-        // Kotlin stub: a=1.5; ax=a*x; return ax/(1+abs(ax))
         let a = 1.5
         let ax = a * x
         return ax / (1.0 + abs(ax))
