@@ -9,22 +9,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.13.0"
-  audio_io:
-    dependency: "direct main"
-    description:
-      name: audio_io
-      sha256: e60cdd27ee626fb64c8bd5c2de56f29becec4f870ab6f32f3817e02c6aaee62c
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.3.0"
-  audio_session:
-    dependency: "direct main"
-    description:
-      name: audio_session
-      sha256: "8f96a7fecbb718cb093070f868b4cdcb8a9b1053dce342ff8ab2fde10eb9afb7"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.2.2"
   boolean_selector:
     dependency: transitive
     description:
@@ -73,14 +57,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.1.4"
-  fftea:
-    dependency: "direct main"
-    description:
-      name: fftea
-      sha256: fede501db039de9737d527a28b1f5ede8f68342f2c4e53459dfa372bd271ed6c
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.5.0+1"
   file:
     dependency: transitive
     description:
@@ -94,22 +70,6 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
-  flutter_audio_capture:
-    dependency: "direct main"
-    description:
-      name: flutter_audio_capture
-      sha256: "873fc96bd2e0033d0f14a41a79f7ed44ee52a32b319eab01a4192d8bb272431a"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.1.11"
-  flutter_audio_output:
-    dependency: "direct main"
-    description:
-      name: flutter_audio_output
-      sha256: "742eb8ac95466daa972dc18b4166059c6da8a1b43a5a71066483b2c91734a7b7"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.0.4"
   flutter_foreground_task:
     dependency: "direct main"
     description:
@@ -312,14 +272,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.1.8"
-  rxdart:
-    dependency: transitive
-    description:
-      name: rxdart
-      sha256: "5c3004a4a8dbb94bd4bf5412a4def4acdaa12e12f269737a5751369e12d1a962"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.28.0"
   shared_preferences:
     dependency: transitive
     description:

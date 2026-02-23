@@ -3,11 +3,9 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
-  flutter_audio_capture
 )
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST
-  audio_io
 )
 
 set(PLUGIN_BUNDLED_LIBRARIES)
