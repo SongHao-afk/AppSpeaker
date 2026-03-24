@@ -12,7 +12,7 @@ class Homepage extends StatefulWidget {
   State<Homepage> createState() => _HomepageState();
 }
 
-class _HomepageState extends State<Homepage> {
+class _HomepageState extends State<Homepage> with WidgetsBindingObserver {
   bool running = false;
   bool _starting = false;
 
@@ -66,6 +66,9 @@ class _HomepageState extends State<Homepage> {
   void initState() {
     super.initState();
 
+    // ✅ ADDED: observe app lifecycle for iOS background audio
+    WidgetsBinding.instance.addObserver(this);
+
     FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
 
     // poll wired
@@ -110,6 +113,7 @@ class _HomepageState extends State<Homepage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this); // ✅ ADDED
     _wiredPoll?.cancel();
     _btPoll?.cancel();
     _paramDebounce?.cancel();
@@ -121,6 +125,23 @@ class _HomepageState extends State<Homepage> {
       BackgroundService.stop();
     }
     super.dispose();
+  }
+
+  // ✅ ADDED: iOS background audio lifecycle
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    debugPrint('🔄 AppLifecycleState: $state, running=$running');
+
+    if (state == AppLifecycleState.resumed && running) {
+      // Khi trở lại foreground: re-subscribe RMS stream để volume meter hoạt động lại
+      _rmsSub?.cancel();
+      _rmsSub = Loopback.rmsStream().listen((rms) {
+        if (!mounted) return;
+        setState(() => volume = rms.clamp(0.0, 1.0));
+      });
+      debugPrint('✅ Re-subscribed RMS stream after resume');
+    }
+    // KHÔNG stop loopback khi paused/inactive → để native tiếp tục chạy nền
   }
 
   LoopbackParams _buildParams() => LoopbackParams(

@@ -1,17 +1,3 @@
-// LoopbackPlugin.swift
-//
-// MERGED PIPELINE:
-// - speaker-default keeps .default mode
-// - AFS notch
-// - dynamic harsh suppression only when RMS is high enough
-// - soft clip only near peaks
-// - noise-floor expander (don't talk = near silence)
-// - pre-emptive duck
-// - feedback guard
-// - rebuilt engine to avoid stale 44.1k graph
-// - tap format mismatch fixed
-// - async stop teardown to reduce UI stall feeling
-
 import Flutter
 import UIKit
 import AVFoundation
@@ -19,16 +5,13 @@ import QuartzCore
 
 public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
-  // ===== Channels =====
   private static let CHANNEL = "loopback"
   private static let EVENTS  = "loopback_events"
 
-  // ===== Audio Session / Engine =====
   private let session = AVAudioSession.sharedInstance()
   private var engine = AVAudioEngine()
   private var player = AVAudioPlayerNode()
 
-  // ===== State / Queue =====
   private let audioQueue = DispatchQueue(label: "loopback.audio.queue", qos: .userInteractive)
   private var running: Bool = false
   private var pendingStartToken: Int = 0
@@ -41,7 +24,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   }
 
   private func onAudioQueue() -> Bool {
-    return DispatchQueue.getSpecific(key: audioQueueKey) != nil
+    DispatchQueue.getSpecific(key: audioQueueKey) != nil
   }
 
   private func audioAsync(_ block: @escaping () -> Void) {
@@ -52,27 +35,22 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     if onAudioQueue() { block() } else { audioQueue.sync(execute: block) }
   }
 
-  // ===== Event sink =====
   private var eventSink: FlutterEventSink?
 
-  // ===== Params from Flutter =====
   private var eqEnabled: Bool = true
-  private var outputGain: Double = 1.0 // kept for API compat
+  private var outputGain: Double = 1.0
   private var bandGains: [Double] = [1, 1, 1, 1, 1]
   private var masterBoost: Double = 1.0
   private var duckOthersEnabled: Bool = true
 
-  // ===== INPUT SELECT (best-effort on iOS) =====
   private var preferWiredMic: Bool = false
   private var headsetMicBoost: Double = 3.0
   private var bluetoothMicBoost: Double = 4.5
 
-  // ===== Last route mode =====
   private var lastVoiceModeRequested: Bool = false
   private var lastVoicePath: Bool = false
   private var lastSampleRate: Double = 48_000
 
-  // ================== A2DP tuning ==================
   private let A2DP_SAFE_GAIN_CAP: Double = 0.70
   private let A2DP_TOTAL_GAIN_CAP: Double = 1.25
   private let FEEDBACK_RMS_THRESHOLD: Double = 0.20
@@ -81,14 +59,14 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private let A2DP_MUTE_MS: Double = 40.0
   private let A2DP_HARD_MUTE_RMS: Double = 0.55
 
-  // ================== Speaker route ==================
   private let SPEAKER_VOICE_SR: Double = 48_000
-  private let FIXED_GAIN_SPEAKER: Double = 0.28
+
+  // tăng gain base cho speaker
+  private let FIXED_GAIN_SPEAKER: Double = 0.34
   private let FIXED_GAIN_WIRED:   Double = 1.35
   private let FIXED_GAIN_HFP:     Double = 1.20
-  private let SPK_TOTAL_GAIN_CAP: Double = 0.42
+  private let SPK_TOTAL_GAIN_CAP: Double = 0.52
 
-  // ================== A2DP mixer style ==================
   private let A2DP_HPF_HZ: Double = 220.0
   private let A2DP_AFS_ANALYZE_MS: Double = 100.0
   private let A2DP_DUCK_MS: Double = 450.0
@@ -99,7 +77,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private let A2DP_GATE_ATTACK_MS: Double = 4.0
   private let A2DP_GATE_RELEASE_MS: Double = 260.0
 
-  // ================== Speaker anti-feedback ==================
   private let SPK_HPF_HZ: Double = 150.0
   private let SPK_LPF_HZ: Double = 2500.0
   private let SPK_GATE_THR: Double = 0.030
@@ -121,19 +98,16 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private let SPK_PRE_DUCK_RMS: Double = 0.022
   private let SPK_HARD_DUCK_RMS: Double = 0.120
 
-  // ===== Reduce self-echo feeling on A2DP =====
   private let A2DP_TALK_RMS_EFFECTIVE: Double = 0.030
   private let A2DP_MONITOR_MIN_EFFECTIVE: Double = 0.60
   private let A2DP_MONITOR_ATTACK: Double = 0.12
   private let A2DP_MONITOR_RELEASE: Double = 0.008
 
-  // ===== Noise-floor expander =====
   private let EXPANDER_THRESHOLD: Double = 0.008
   private let EXPANDER_RATIO: Double = 0.25
   private let EXPANDER_ATTACK: Double = 0.18
   private let EXPANDER_RELEASE: Double = 0.025
 
-  // ===== DSP =====
   private var eq: Eq5Band?
   private var hpf: OnePoleHpf?
   private var a2dpLpf: OnePoleLpf?
@@ -145,7 +119,9 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private var comp: SimpleCompressor?
   private var limiter: SimpleLimiter?
 
-  // ===== Runtime =====
+  private var speechTracker: SpeechPresenceTracker?
+  private var speakerGuardCtl: SpeakerFeedbackController?
+
   private var a2dpFlag: Bool = false
   private var lastA2dpCheckTs: Double = 0.0
   private var duckUntilTs: Double = 0.0
@@ -161,29 +137,31 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private var lastGuardLogTs: Double = 0.0
   private var lastMeterTs: Double = 0.0
 
-  // ===== Cached audio format used for output scheduling =====
+  private var lastSpeechActive: Bool = false
+  private var lastSpeechScore: Double = 0.0
+  private var lastZcr: Double = 0.0
+
   private var monoFormat: AVAudioFormat?
 
-  // ===== Buffer pool =====
   private let poolLock = NSLock()
   private var freePool: [AVAudioPCMBuffer] = []
   private var freePoolFrames: Int = 0
   private var freePoolCount: Int = 36
 
-  // ===== Stable scheduling timeline =====
   private var nextPlaySampleTime: AVAudioFramePosition = 0
   private var hasTimeline: Bool = false
 
-  // ===== Cached route flags =====
   private var routeA2dp: Bool = false
   private var routeWired: Bool = false
   private var routeBtMic: Bool = false
 
-  // ===== Extra guards =====
   private var lastRouteRestartTs: Double = 0.0
   private var didLogTapBufferFormat: Bool = false
 
-  // MARK: Route helpers
+  // warmup chống bóp gain ngay lúc mới start
+  private var startWarmupUntilTs: Double = 0.0
+  private var isStoppingNow: Bool = false
+
   private func updateRouteCache() {
     let r = session.currentRoute
 
@@ -211,7 +189,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     return (a2dp, wired, btHfp, outIsSpeaker)
   }
 
-  // MARK: Pool helpers
   private func prepareFreePool(frames: Int, mono: AVAudioFormat) {
     if freePoolFrames == frames, !freePool.isEmpty { return }
     freePoolFrames = frames
@@ -245,7 +222,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   }
 
   private func isPooledBuffer(_ b: AVAudioPCMBuffer) -> Bool {
-    return freePoolFrames > 0 && Int(b.frameCapacity) == freePoolFrames
+    freePoolFrames > 0 && Int(b.frameCapacity) == freePoolFrames
   }
 
   private func rebuildEngineGraph() {
@@ -267,7 +244,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     log("🧱[Engine] rebuilt fresh graph")
   }
 
-  // MARK: Logging
   private func log(_ msg: String) { NSLog("%@", msg) }
 
   public static func register(with registrar: FlutterPluginRegistrar) {
@@ -296,7 +272,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     return nil
   }
 
-  // MARK: Method handler
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     if call.method != "isWiredPresent" && call.method != "isBtHeadsetPresent" {
       log("📩[MethodChannel] method=\(call.method) args=\(String(describing: call.arguments))")
@@ -376,7 +351,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     }
   }
 
-  // MARK: Debug helpers
   private func permStr(_ p: AVAudioSession.RecordPermission) -> String {
     switch p {
     case .granted: return "granted"
@@ -401,7 +375,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     log("🎧[\(tag)] cat=\(cat) mode=\(mode) sr=\(sr) io=\(io) route=\(r)")
   }
 
-  // MARK: Mic permission
   private func ensureMicPermission(_ cb: @escaping (Bool) -> Void) {
     let st = AVAudioSession.sharedInstance().recordPermission
     log("🎙️[MicPerm] recordPermission=\(permStr(st))")
@@ -420,7 +393,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     }
   }
 
-  // MARK: Start/Stop
   private func startLoopback(voiceMode: Bool) {
     ensureMicPermission { [weak self] granted in
       guard let self else { return }
@@ -475,11 +447,12 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     configureAndStart(sampleRate: 48_000, voicePath: false, token: pendingStartToken)
   }
 
+  // stop đồng bộ hơn để lần start sau không bị race
   private func stopLoopback() {
     pendingStartToken += 1
     running = false
+    isStoppingNow = true
 
-    // reset state immediately
     guardGain = 1.0
     monitorGain = 1.0
     harshMix = 0.0
@@ -493,6 +466,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     lastGuardLogTs = 0.0
     lastRouteRestartTs = 0.0
     didLogTapBufferFormat = false
+    startWarmupUntilTs = 0.0
 
     hasTimeline = false
     nextPlaySampleTime = 0
@@ -509,14 +483,18 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     limiter = nil
     monoFormat = nil
 
+    speechTracker = nil
+    speakerGuardCtl = nil
+    lastSpeechActive = false
+    lastSpeechScore = 0.0
+    lastZcr = 0.0
+
     poolLock.lock()
     freePool.removeAll()
     poolLock.unlock()
     freePoolFrames = 0
 
-    // teardown async to reduce stop button hitch
-    audioAsync { [weak self] in
-      guard let self else { return }
+    audioSyncIfNeeded {
       self.engine.inputNode.removeTap(onBus: 0)
       self.player.stop()
       self.engine.stop()
@@ -524,9 +502,10 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       try? self.session.setActive(false, options: [.notifyOthersOnDeactivation])
       self.log("⏹[stopLoopback] stopped + deactivated session")
     }
+
+    isStoppingNow = false
   }
 
-  // MARK: Engine setup
   private func configureAndStart(sampleRate: Double, voicePath: Bool, token: Int) {
     guard token == pendingStartToken else { return }
 
@@ -576,6 +555,9 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       self.engine.mainMixerNode.outputVolume = 1.0
 
       self.buildDsp(sampleRate: hwFs)
+
+      self.startWarmupUntilTs = self.nowMs() + 450.0
+      self.isStoppingNow = false
 
       if self.a2dpFlag {
         self.guardGain = 0.18
@@ -634,7 +616,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private func configureSession(voicePath: Bool, sampleRate: Double) throws {
     let beforePerm = session.recordPermission
     log("⚙️[configureSession] BEGIN voicePath=\(voicePath) sampleRate=\(sampleRate) duck=\(duckOthersEnabled) perm=\(permStr(beforePerm))")
-    log("🔥 BUILD_TAG=2026-03-17-SPK-AFS-DYNEQ-SOFTCLIP-DUCK-GUARD-2 SPEAKER_VOICE_SR=\(SPEAKER_VOICE_SR) FIXED_GAIN_SPEAKER=\(FIXED_GAIN_SPEAKER)")
+    log("🔥 BUILD_TAG=2026-03-24-SPK-LOUDER-LESS-CUT SPEAKER_VOICE_SR=\(SPEAKER_VOICE_SR) FIXED_GAIN_SPEAKER=\(FIXED_GAIN_SPEAKER)")
     log("🔥 FILE=\(#file) LINE=\(#line)")
     logSession("beforeConfigure")
 
@@ -736,6 +718,14 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
                             attackMs: 0.12,
                             releaseMs: 180.0)
 
+    speechTracker = SpeechPresenceTracker(sampleRate: fs)
+    speakerGuardCtl = SpeakerFeedbackController(
+      guardMinSpeech: 0.55,
+      guardMinNonSpeech: 0.42,
+      hotRms: 0.22,
+      riseThr: 0.090
+    )
+
     hpf?.resetState()
     a2dpLpf?.resetState()
     spkLpf2?.resetState()
@@ -745,19 +735,23 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     comp?.reset()
     limiter?.reset()
     afs?.reset()
+    speechTracker?.reset()
+    speakerGuardCtl?.reset()
 
     applyEqIfChanged(force: true)
   }
 
-  // MARK: Processing loop
   private func processTap(buffer: AVAudioPCMBuffer, voicePath: Bool) {
     guard running else { return }
+    guard !isStoppingNow else { return }
     guard let ch0 = buffer.floatChannelData?[0] else { return }
 
     let n = Int(buffer.frameLength)
     if n <= 0 { return }
 
     let now = nowMs()
+    let inStartupGrace = now < startWarmupUntilTs
+
     let live = liveRouteFlags()
     let isSpeakerDefaultNow = voicePath && live.outIsSpeaker && !live.wired && !live.a2dp && !live.btHfp && !a2dpFlag
 
@@ -776,7 +770,10 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         expander?.reset()
         gate?.reset()
         afs?.reset()
+        speechTracker?.reset()
+        speakerGuardCtl?.reset()
         duckUntilTs = 0.0
+        startWarmupUntilTs = now + 450.0
 
         hasTimeline = false
         nextPlaySampleTime = 0
@@ -800,7 +797,25 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     let rise = rawRms - lastRms
     let gateBypass = rawRms < 0.010
 
-    // ===== noise-floor expander =====
+    var speechActive = false
+    if isSpeakerDefaultNow, let st = speechTracker {
+      let speechInfo = st.analyze(buf: ch0, count: n, nowMs: now)
+      speechActive = speechInfo.active
+
+      // fallback cho giọng hữu thanh zcr thấp
+      if !speechActive && rawRms > 0.040 && speechInfo.zcr < 0.090 {
+        speechActive = true
+      }
+
+      lastSpeechActive = speechActive
+      lastSpeechScore = speechInfo.score
+      lastZcr = speechInfo.zcr
+    } else {
+      lastSpeechActive = false
+      lastSpeechScore = 0.0
+      lastZcr = 0.0
+    }
+
     if isSpeakerDefaultNow {
       let targetExpand: Double
       if rawRms < EXPANDER_THRESHOLD {
@@ -815,58 +830,68 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       expanderGain = 1.0
     }
 
-    // ===== monitor suppression =====
     if a2dpFlag {
       let talking = rawRms > A2DP_TALK_RMS_EFFECTIVE
       let target = talking ? A2DP_MONITOR_MIN_EFFECTIVE : 1.0
       let k = talking ? A2DP_MONITOR_ATTACK : A2DP_MONITOR_RELEASE
       monitorGain += (target - monitorGain) * k
     } else if isSpeakerDefaultNow {
-      let talking = rawRms > SPK_TALK_RMS
-      let target = talking ? SPK_MONITOR_MIN : 1.0
-      let k = talking ? SPK_MONITOR_ATTACK : SPK_MONITOR_RELEASE
-      monitorGain += (target - monitorGain) * k
+      if let ctl = speakerGuardCtl {
+        ctl.update(rawRms: rawRms, rise: rise, speechActive: speechActive, nowMs: now, startupGrace: inStartupGrace)
+        monitorGain = ctl.monitorGain
+        preDuckGain = ctl.preDuckGain
+        guardGain = ctl.guardGain
+        duckUntilTs = max(duckUntilTs, ctl.duckUntilMs)
+      } else {
+        monitorGain = 1.0
+        preDuckGain = 1.0
+      }
     } else {
       monitorGain = 1.0
-    }
-
-    // ===== pre-emptive duck =====
-    if isSpeakerDefaultNow {
-      let targetPreDuck: Double
-      if rawRms > SPK_HARD_DUCK_RMS {
-        targetPreDuck = 0.45
-      } else if rawRms > SPK_PRE_DUCK_RMS {
-        targetPreDuck = 0.72
-      } else {
-        targetPreDuck = 1.0
-      }
-      let k = (targetPreDuck < preDuckGain) ? 0.22 : 0.015
-      preDuckGain += (targetPreDuck - preDuckGain) * k
-    } else {
       preDuckGain = 1.0
     }
 
-    // ===== dynamic harsh suppression only when RMS is really up =====
+    if !isSpeakerDefaultNow {
+      preDuckGain = 1.0
+    }
+
     if isSpeakerDefaultNow {
       let targetHarshMix: Double
-      if rawRms < 0.020 {
-        targetHarshMix = 0.0
-      } else if rawRms > 0.16 {
-        targetHarshMix = 0.65
-      } else if rawRms > 0.08 {
-        targetHarshMix = 0.45
-      } else if rawRms > 0.04 {
-        targetHarshMix = 0.22
+
+      if inStartupGrace {
+        if rawRms > 0.20 {
+          targetHarshMix = 0.08
+        } else {
+          targetHarshMix = 0.02
+        }
+      } else if speechActive {
+        if rawRms > 0.22 {
+          targetHarshMix = 0.12
+        } else if rawRms > 0.12 {
+          targetHarshMix = 0.08
+        } else {
+          targetHarshMix = 0.02
+        }
       } else {
-        targetHarshMix = 0.10
+        if rawRms < 0.020 {
+          targetHarshMix = 0.0
+        } else if rawRms > 0.24 {
+          targetHarshMix = 0.22
+        } else if rawRms > 0.12 {
+          targetHarshMix = 0.14
+        } else if rawRms > 0.06 {
+          targetHarshMix = 0.08
+        } else {
+          targetHarshMix = 0.03
+        }
       }
-      let k = (targetHarshMix > harshMix) ? 0.16 : 0.04
+
+      let k = (targetHarshMix > harshMix) ? 0.08 : 0.04
       harshMix += (targetHarshMix - harshMix) * k
     } else {
       harshMix = 0.0
     }
 
-    // ===== AFS analyze =====
     if a2dpFlag && rawRms > 0.018 && (now - lastAnalyzeTs) >= A2DP_AFS_ANALYZE_MS {
       lastAnalyzeTs = now
       afs?.analyzeFloat(input: ch0, count: n)
@@ -895,18 +920,29 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     var combinedGain = (gCap * masterBoost) * guardGain * micBoost * monitorGain * preDuckGain * expanderGain
 
     if isSpeakerDefaultNow {
-      if rawRms > 0.12 {
-        combinedGain = min(combinedGain, 0.16)
+      if !speechActive && !inStartupGrace && rawRms > 0.22 {
+        combinedGain = min(combinedGain, 0.24)
       }
+
       combinedGain = min(combinedGain, SPK_TOTAL_GAIN_CAP)
-      combinedGain = max(combinedGain, 0.0)
+
+      let floor: Double
+      if inStartupGrace {
+        floor = 0.18
+      } else if speechActive {
+        floor = 0.16
+      } else {
+        floor = 0.08
+      }
+
+      combinedGain = max(combinedGain, floor)
     }
 
     if a2dpFlag { combinedGain = min(combinedGain, A2DP_TOTAL_GAIN_CAP) }
 
     if now - lastGuardLogTs > 1000 {
       lastGuardLogTs = now
-      log("🎛️[GAIN] speakerDefault=\(isSpeakerDefaultNow) rawRms=\(String(format: "%.3f", rawRms)) rise=\(String(format: "%.3f", rise)) base=\(String(format: "%.2f", baseGain)) guard=\(String(format: "%.3f", guardGain)) monitor=\(String(format: "%.3f", monitorGain)) preDuck=\(String(format: "%.3f", preDuckGain)) expander=\(String(format: "%.3f", expanderGain)) harshMix=\(String(format: "%.2f", harshMix)) combined=\(String(format: "%.2f", combinedGain))")
+      log("🎛️[GAIN] speakerDefault=\(isSpeakerDefaultNow) speech=\(speechActive) speechScore=\(String(format: "%.2f", lastSpeechScore)) zcr=\(String(format: "%.3f", lastZcr)) startupGrace=\(inStartupGrace) rawRms=\(String(format: "%.3f", rawRms)) rise=\(String(format: "%.3f", rise)) base=\(String(format: "%.2f", baseGain)) guard=\(String(format: "%.3f", guardGain)) monitor=\(String(format: "%.3f", monitorGain)) preDuck=\(String(format: "%.3f", preDuckGain)) expander=\(String(format: "%.3f", expanderGain)) harshMix=\(String(format: "%.2f", harshMix)) combined=\(String(format: "%.4f", combinedGain))")
     }
 
     guard let mono = monoFormat else { return }
@@ -958,7 +994,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
           x = afs?.process(x) ?? x
         }
 
-        if duckNow { x *= 0.74 }
+        if duckNow { x *= 0.82 }
 
         x *= combinedGain
 
@@ -969,7 +1005,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         x = limiter?.process(x) ?? x
         x = softClip(x)
 
-        // extra silence floor kill after processing
         if isSpeakerDefaultNow && rawRms < 0.006 && abs(x) < 0.010 {
           x = 0.0
         }
@@ -1006,7 +1041,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
           x = afs?.process(x) ?? x
         }
 
-        if duckNow { x *= 0.74 }
+        if duckNow { x *= 0.82 }
 
         x *= combinedGain
 
@@ -1029,7 +1064,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     let rmsNow = sqrt(sumSq / Double(n)).clamp01()
 
-    // ===== A2DP guard =====
     if a2dpFlag {
       let risingFast = (rmsNow - lastRms) > FEEDBACK_RISE_THRESHOLD
       let tooLoud = rmsNow > FEEDBACK_RMS_THRESHOLD
@@ -1053,27 +1087,27 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       }
     }
 
-    // ===== Speaker guard =====
     if isSpeakerDefaultNow {
-      let speakerRise = rise > SPK_FEEDBACK_RISE_THRESHOLD
-      let speakerHot  = rawRms > SPK_FEEDBACK_RMS_THRESHOLD
+      let speakerRise = rise > 0.070
+      let speakerHot  = rawRms > 0.20
 
-      if rawRms > SPK_PRE_DUCK_RMS {
-        duckUntilTs = now + 220.0
+      if !speechActive && !inStartupGrace && (speakerHot || speakerRise) {
+        duckUntilTs = now + 320.0
       }
 
-      if speakerHot || speakerRise {
-        duckUntilTs = now + SPK_DUCK_MS
-        guardGain *= 0.82
-        monitorGain *= 0.88
-        if guardGain < SPK_GUARD_MIN { guardGain = SPK_GUARD_MIN }
-      } else {
-        guardGain += (1.0 - guardGain) * 0.010
+      if let ctl = speakerGuardCtl {
+        if ctl.shouldHardMute(rawRms: rawRms, rise: rise, speechActive: speechActive, startupGrace: inStartupGrace) {
+          let muteSamples = min(n, max(1, Int(mono.sampleRate * 0.003)))
+          for i in 0..<muteSamples { outData[i] *= 0.35 }
+        }
       }
 
-      if rawRms > SPK_HARD_DUCK_RMS {
-        let muteSamples = min(n, max(1, Int(mono.sampleRate * 0.004)))
-        for i in 0..<muteSamples { outData[i] *= 0.15 }
+      if rawRms > SPK_PRE_DUCK_RMS && !speechActive && !inStartupGrace {
+        duckUntilTs = max(duckUntilTs, now + min(220.0, SPK_DUCK_MS))
+      }
+
+      if guardGain < SPK_GUARD_MIN {
+        guardGain = SPK_GUARD_MIN
       }
     }
 
@@ -1115,7 +1149,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     }
   }
 
-  // MARK: EQ refresh
   private var lastEqEnabled: Bool = true
   private var lastGain: Double = 1.0
   private var lastMaster: Double = 1.0
@@ -1163,7 +1196,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     eq.updateGainsDb(db)
   }
 
-  // MARK: Route change
   private func handleRouteChanged() {
     guard running else { return }
 
@@ -1228,7 +1260,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     }
   }
 
-  // MARK: Notifications
   private func installNotifications() {
     NotificationCenter.default.addObserver(
       self,
@@ -1268,7 +1299,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
   deinit { NotificationCenter.default.removeObserver(self) }
 
-  // MARK: Helpers
   private func softClip(_ x: Double) -> Double {
     let ax = abs(x)
     let th = 0.60

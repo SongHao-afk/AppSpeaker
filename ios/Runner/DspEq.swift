@@ -1,4 +1,3 @@
-// DspEq.swift
 import Foundation
 
 // MARK: - Biquad (Direct Form II)
@@ -114,7 +113,6 @@ final class Eq5Band {
 
     init(fs: Double) { self.fs = fs }
 
-    /// db length=5: [low, m1, m2, m3, high]
     func updateGainsDb(_ db: [Double]) {
         guard db.count >= 5 else { return }
 

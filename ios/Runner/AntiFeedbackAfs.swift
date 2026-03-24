@@ -1,4 +1,3 @@
-// AntiFeedbackAfs.swift
 import Foundation
 
 // MARK: - AntiFeedbackAfs (speaker-default tuned)
@@ -6,30 +5,24 @@ final class AntiFeedbackAfs {
 
     private let fs: Double
 
-    // 🔧 PATCH:
     // Ưu tiên dải built-in speaker dễ ring / chói nhất
-    // bớt focus vào quá cao, thêm vùng thấp-mid hay hú trên phone speaker
     private let candidates: [Double] = [
         800.0, 1000.0, 1250.0, 1600.0, 2000.0, 2500.0, 3150.0, 4000.0, 5000.0
     ]
 
-    // ✅ giữ 2 notch để đỡ boxy
     private let notchCount = 2
     private var notch: [Biquad]
     private var notchF: [Double]
     private var notchUntilMs: [Int64]
 
-    // 🔧 PATCH:
-    // notch rộng hơn chút để trị ringing speaker tốt hơn
-    // Q thấp hơn = notch rộng hơn = bớt rít/chói hơn
-    private let Q: Double = 6.5
+    // notch hẹp hơn để bớt ăn nhầm giọng
+    private let Q: Double = 8.0
 
-    // EMA baseline
     private var ema: [Double]
     private let emaAlpha: Double = 0.92
 
-    // 🔧 PATCH: giữ notch lâu hơn
-    private let holdMs: Int64 = 1200
+    // giữ notch ngắn hơn để bớt làm mỏng tiếng
+    private let holdMs: Int64 = 700
 
     init(fs: Double) {
         self.fs = fs
@@ -60,7 +53,6 @@ final class AntiFeedbackAfs {
         return c
     }
 
-    // MARK: - Analyze Float32 directly
     func analyzeFloat(input: UnsafePointer<Float>, count n: Int) {
         let now = Self.nowMs()
 
@@ -88,13 +80,10 @@ final class AntiFeedbackAfs {
         let f0 = candidates[bestK]
         let bestEnergy = e[bestK]
 
-        // 🔧 PATCH:
-        // Detect dễ hơn để chụp ringing sớm hơn
-        if bestScore < 6.5 { return }
-        if bestEnergy < 3e-6 { return }
+        // bớt nhạy để không bắt nhầm giọng nói
+        if bestScore < 8.5 { return }
+        if bestEnergy < 8e-6 { return }
 
-        // 🔧 PATCH:
-        // refresh notch đang có nếu gần tần số hiện tại hơn
         for i in 0..<notchCount {
             if notchF[i] > 0.0,
                abs(notchF[i] - f0) < 180.0,
@@ -104,7 +93,6 @@ final class AntiFeedbackAfs {
             }
         }
 
-        // tìm slot rảnh
         var slot = -1
         for i in 0..<notchCount {
             if now >= notchUntilMs[i] {
@@ -113,7 +101,6 @@ final class AntiFeedbackAfs {
             }
         }
 
-        // nếu không có slot rảnh, thay slot có expiry sớm nhất
         if slot < 0 {
             var minUntil = notchUntilMs[0]
             slot = 0
@@ -130,7 +117,6 @@ final class AntiFeedbackAfs {
         notchUntilMs[slot] = now + holdMs
     }
 
-    // MARK: - Process
     func process(_ xIn: Double) -> Double {
         var x = xIn
         let now = Self.nowMs()
@@ -143,7 +129,6 @@ final class AntiFeedbackAfs {
         return x
     }
 
-    // MARK: - Goertzel (Float)
     private func goertzelEnergyFloat(
         buf: UnsafePointer<Float>,
         n: Int,

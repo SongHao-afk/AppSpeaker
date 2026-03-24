@@ -1,7 +1,5 @@
-// DspUtils.swift
 import Foundation
 
-// MARK: - softClipCubic (optional helper)
 @inline(__always)
 func softClipCubic(_ xIn: Double) -> Double {
     if !xIn.isFinite { return 0.0 }
@@ -14,7 +12,6 @@ func softClipCubic(_ xIn: Double) -> Double {
     return min(1.0, max(-1.0, y))
 }
 
-// MARK: - OnePoleHPF
 final class OnePoleHpf {
     private var a: Double = 0.0
     private var x1: Double = 0.0
@@ -43,7 +40,6 @@ final class OnePoleHpf {
     }
 }
 
-// MARK: - OnePoleLPF
 final class OnePoleLpf {
     private var a: Double = 0.0
     private var y1: Double = 0.0
@@ -68,7 +64,6 @@ final class OnePoleLpf {
     }
 }
 
-// MARK: - SimpleGate
 final class SimpleGate {
     private let thr: Double
     private let atk: Double
@@ -110,7 +105,6 @@ final class SimpleGate {
     }
 }
 
-// MARK: - DownwardExpander
 final class DownwardExpander {
     private let thr: Double
     private let ratio: Double
@@ -163,7 +157,6 @@ final class DownwardExpander {
     }
 }
 
-// MARK: - SimpleCompressor
 final class SimpleCompressor {
     private let thr: Double
     private let rat: Double
@@ -199,7 +192,6 @@ final class SimpleCompressor {
     func reset() { env = 0.0 }
 }
 
-// MARK: - SimpleLimiter
 final class SimpleLimiter {
     private let sr: Double
     private let thr: Double
@@ -230,5 +222,179 @@ final class SimpleLimiter {
             g = rel * g + (1.0 - rel) * desired
         }
         return xIn * g
+    }
+}
+
+// Nới detector để bắt speech sớm hơn, nhất là voice có ZCR thấp
+final class SpeechPresenceTracker {
+    private let attack: Double
+    private let release: Double
+    private let rmsOn: Double
+    private let rmsOff: Double
+    private let zcrMin: Double
+    private let zcrMax: Double
+    private let hangMs: Double
+
+    private var score: Double = 0.0
+    private var activeUntilMs: Double = 0.0
+
+    init(sampleRate: Double,
+         rmsOn: Double = 0.014,
+         rmsOff: Double = 0.008,
+         zcrMin: Double = 0.008,
+         zcrMax: Double = 0.30,
+         attackMs: Double = 12.0,
+         releaseMs: Double = 220.0,
+         hangMs: Double = 320.0) {
+        let atkDen = max(1e-6, sampleRate * (attackMs / 1000.0))
+        let relDen = max(1e-6, sampleRate * (releaseMs / 1000.0))
+        self.attack = exp(-1.0 / atkDen)
+        self.release = exp(-1.0 / relDen)
+        self.rmsOn = rmsOn
+        self.rmsOff = rmsOff
+        self.zcrMin = zcrMin
+        self.zcrMax = zcrMax
+        self.hangMs = hangMs
+    }
+
+    func reset() {
+        score = 0.0
+        activeUntilMs = 0.0
+    }
+
+    func analyze(buf: UnsafePointer<Float>, count n: Int, nowMs: Double) -> (active: Bool, rms: Double, zcr: Double, score: Double) {
+        guard n > 1 else { return (false, 0.0, 0.0, score) }
+
+        var sumSq = 0.0
+        var zc = 0
+        var prev = Double(buf[0])
+
+        for i in 0..<n {
+            let x = Double(buf[i])
+            sumSq += x * x
+            if i > 0 {
+                if (prev >= 0.0 && x < 0.0) || (prev < 0.0 && x >= 0.0) {
+                    zc += 1
+                }
+            }
+            prev = x
+        }
+
+        let rms = sqrt(sumSq / Double(n))
+        let zcr = Double(zc) / Double(n)
+
+        let strongSpeech = (rms >= rmsOn && zcr >= zcrMin && zcr <= zcrMax)
+        let weakSpeech = (rms >= rmsOff && zcr >= zcrMin * 0.6 && zcr <= zcrMax * 1.25)
+        let voicedLike = (rms >= 0.030 && zcr <= 0.08)
+
+        let target: Double
+        if strongSpeech {
+            target = 1.0
+        } else if voicedLike {
+            target = 0.82
+        } else if weakSpeech {
+            target = 0.58
+        } else {
+            target = 0.0
+        }
+
+        let k = (target > score) ? (1.0 - attack) : (1.0 - release)
+        score += (target - score) * k
+
+        if score > 0.50 {
+            activeUntilMs = nowMs + hangMs
+        }
+
+        let active = nowMs < activeUntilMs || score > 0.52
+        return (active, rms, zcr, score)
+    }
+}
+
+// Nới guard để tiếng to hơn, bớt cắt âm
+final class SpeakerFeedbackController {
+    private(set) var guardGain: Double = 1.0
+    private(set) var preDuckGain: Double = 1.0
+    private(set) var monitorGain: Double = 1.0
+    private(set) var duckUntilMs: Double = 0.0
+
+    private let guardMinSpeech: Double
+    private let guardMinNonSpeech: Double
+    private let hotRms: Double
+    private let riseThr: Double
+
+    init(guardMinSpeech: Double = 0.55,
+         guardMinNonSpeech: Double = 0.42,
+         hotRms: Double = 0.22,
+         riseThr: Double = 0.090) {
+        self.guardMinSpeech = guardMinSpeech
+        self.guardMinNonSpeech = guardMinNonSpeech
+        self.hotRms = hotRms
+        self.riseThr = riseThr
+    }
+
+    func reset() {
+        guardGain = 1.0
+        preDuckGain = 1.0
+        monitorGain = 1.0
+        duckUntilMs = 0.0
+    }
+
+    func update(rawRms: Double, rise: Double, speechActive: Bool, nowMs: Double, startupGrace: Bool) {
+        let hot = rawRms > hotRms
+        let rising = rise > riseThr
+
+        if startupGrace {
+            let targetMonitor = rawRms > 0.05 ? 0.92 : 1.0
+            let targetPreDuck = rawRms > 0.16 ? 0.94 : 1.0
+
+            monitorGain += (targetMonitor - monitorGain) * 0.08
+            preDuckGain += (targetPreDuck - preDuckGain) * 0.08
+            guardGain += (1.0 - guardGain) * 0.05
+
+            if guardGain < 0.80 { guardGain = 0.80 }
+            return
+        }
+
+        if speechActive {
+            let targetMonitor = rawRms > 0.04 ? 0.90 : 1.0
+            let targetPreDuck = rawRms > 0.16 ? 0.93 : 1.0
+
+            monitorGain += (targetMonitor - monitorGain) * (targetMonitor < monitorGain ? 0.08 : 0.03)
+            preDuckGain += (targetPreDuck - preDuckGain) * (targetPreDuck < preDuckGain ? 0.09 : 0.03)
+
+            if hot && rising {
+                duckUntilMs = nowMs + 100.0
+                guardGain *= 0.97
+            } else if hot {
+                guardGain *= 0.985
+            } else {
+                guardGain += (1.0 - guardGain) * 0.030
+            }
+
+            if guardGain < guardMinSpeech { guardGain = guardMinSpeech }
+        } else {
+            let targetMonitor = rawRms > 0.03 ? 0.84 : 1.0
+            let targetPreDuck = rawRms > 0.12 ? 0.88 : 1.0
+
+            monitorGain += (targetMonitor - monitorGain) * (targetMonitor < monitorGain ? 0.10 : 0.03)
+            preDuckGain += (targetPreDuck - preDuckGain) * (targetPreDuck < preDuckGain ? 0.10 : 0.03)
+
+            if hot && rising {
+                duckUntilMs = nowMs + 240.0
+                guardGain *= 0.90
+            } else if hot {
+                guardGain *= 0.95
+            } else {
+                guardGain += (1.0 - guardGain) * 0.018
+            }
+
+            if guardGain < guardMinNonSpeech { guardGain = guardMinNonSpeech }
+        }
+    }
+
+    func shouldHardMute(rawRms: Double, rise: Double, speechActive: Bool, startupGrace: Bool) -> Bool {
+        if startupGrace { return false }
+        if speechActive { return false }
+        return rawRms > 0.50 || rise > 0.18
     }
 }
