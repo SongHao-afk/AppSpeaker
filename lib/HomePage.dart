@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io'; // ✅ ADD: để check Platform.isAndroid
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -46,8 +47,7 @@ class _HomepageState extends State<Homepage> {
   bool wiredPresent = false; // đang cắm tai nghe dây/USB?
   bool preferWiredMic = false; // switch: dùng mic tai nghe
   Timer? _wiredPoll; // poll enable/disable switch
-  // ✅ ADDED: boost cho mic tai nghe (vì thường rất nhỏ)
-  double headsetBoost = 2.2;
+  double headsetBoost = 2.2; // boost cho mic tai nghe
   // =================================================================
 
   // ================== ✅ ADDED: BT headset presence for enabling voiceMode ==================
@@ -66,10 +66,9 @@ class _HomepageState extends State<Homepage> {
   void initState() {
     super.initState();
 
-    // ✅ Listen for notification button events
     FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
 
-    // ✅ ADDED: poll xem có cắm wired không để enable/disable switch
+    // poll wired
     _wiredPoll = Timer.periodic(const Duration(milliseconds: 500), (_) async {
       try {
         final v = await Loopback.isWiredPresent();
@@ -78,7 +77,6 @@ class _HomepageState extends State<Homepage> {
         if (v != wiredPresent) {
           setState(() => wiredPresent = v);
 
-          // nếu rút dây -> tắt preferWiredMic cho khỏi "kẹt"
           if (!v && preferWiredMic) {
             preferWiredMic = false;
             try {
@@ -93,7 +91,7 @@ class _HomepageState extends State<Homepage> {
       } catch (_) {}
     });
 
-    // ================== ✅ ADDED: poll xem có tai nghe BT có mic không để enable voiceMode ==================
+    // poll bt headset mic
     _btPoll = Timer.periodic(const Duration(milliseconds: 500), (_) async {
       try {
         final v = await Loopback.isBtHeadsetPresent();
@@ -102,23 +100,22 @@ class _HomepageState extends State<Homepage> {
         if (v != btHeadsetPresent) {
           setState(() => btHeadsetPresent = v);
 
-          // nếu tai nghe BT bị ngắt mà đang bật voiceMode -> tự tắt để khỏi "kẹt"
           if (!v && voiceMode) {
             setState(() => voiceMode = false);
           }
         }
       } catch (_) {}
     });
-    // =======================================================================================================
   }
 
   @override
   void dispose() {
-    _wiredPoll?.cancel(); // ✅ ADDED
-    _btPoll?.cancel(); // ✅ ADDED
+    _wiredPoll?.cancel();
+    _btPoll?.cancel();
     _paramDebounce?.cancel();
     _rmsSub?.cancel();
     FlutterForegroundTask.removeTaskDataCallback(_onReceiveTaskData);
+
     if (running) {
       Loopback.stop();
       BackgroundService.stop();
@@ -145,27 +142,33 @@ class _HomepageState extends State<Homepage> {
     });
   }
 
+  // ✅✅✅ FIX CHÍNH NẰM Ở ĐÂY
+  // - Android: xin permission bằng permission_handler
+  // - iOS: KHÔNG chặn ở đây, để native requestRecordPermission tự bật popup
   Future<void> _start() async {
     if (_starting || running) return;
     _starting = true;
-    try {
-      final statuses = await [
-        Permission.microphone,
-        Permission.bluetoothConnect, // Android 12+ (ignore nếu thấp hơn)
-        Permission.notification, // Android 13+ for foreground notification
-      ].request();
 
-      final micGranted = statuses[Permission.microphone]?.isGranted ?? false;
-      if (!micGranted) {
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(const SnackBar(content: Text('⚠️ Cần quyền Micro')));
+    try {
+      if (Platform.isAndroid) {
+        final statuses = await [
+          Permission.microphone,
+          Permission.bluetoothConnect,
+          Permission.notification,
+        ].request();
+
+        final micGranted = statuses[Permission.microphone]?.isGranted ?? false;
+        if (!micGranted) {
+          if (mounted) {
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(const SnackBar(content: Text('⚠️ Cần quyền Micro')));
+          }
+          return;
         }
-        return;
       }
 
-      // ✅ ADDED: set input preference trước khi start (để native pick đúng)
+      // set input preference trước khi start
       try {
         await Loopback.setPreferWiredMic(
           preferWiredMic,
@@ -173,9 +176,10 @@ class _HomepageState extends State<Homepage> {
         );
       } catch (_) {}
 
-      // Start foreground service
+      // Start foreground service (Android cần; iOS gọi cũng không sao)
       await BackgroundService.start();
 
+      // ✅ iOS sẽ popup xin mic ở native nếu đang undetermined
       await Loopback.start(voiceMode: voiceMode);
       await _pushParams();
 
@@ -204,7 +208,6 @@ class _HomepageState extends State<Homepage> {
     await _rmsSub?.cancel();
     _rmsSub = null;
 
-    // Stop foreground service
     await BackgroundService.stop();
 
     if (mounted) {
@@ -295,7 +298,6 @@ class _HomepageState extends State<Homepage> {
                 style: const TextStyle(color: Colors.white70),
               ),
 
-              // Service status indicator
               if (running) ...[
                 const SizedBox(height: 12),
                 Container(
@@ -351,7 +353,7 @@ class _HomepageState extends State<Homepage> {
                         const SizedBox(width: 10),
                         Switch(
                           value: voiceMode,
-                          activeColor: Colors.greenAccent,
+                          activeThumbColor: Colors.greenAccent,
                           onChanged: (running || !btHeadsetPresent)
                               ? null
                               : (v) => setState(() => voiceMode = v),
@@ -384,7 +386,6 @@ class _HomepageState extends State<Homepage> {
                 ),
               ),
 
-              // ================== ✅ ADDED UI BLOCK START ==================
               const SizedBox(height: 12),
               Container(
                 padding: const EdgeInsets.all(12),
@@ -406,7 +407,7 @@ class _HomepageState extends State<Homepage> {
                         const SizedBox(width: 10),
                         Switch(
                           value: preferWiredMic,
-                          activeColor: Colors.cyanAccent,
+                          activeThumbColor: Colors.cyanAccent,
                           onChanged: (!wiredPresent)
                               ? null
                               : (v) async {
@@ -433,8 +434,6 @@ class _HomepageState extends State<Homepage> {
                       ),
                       textAlign: TextAlign.center,
                     ),
-
-                    // ✅ ADDED: slider boost khi dùng mic tai nghe
                     if (wiredPresent && preferWiredMic) ...[
                       const SizedBox(height: 8),
                       Text(
@@ -465,7 +464,6 @@ class _HomepageState extends State<Homepage> {
                 ),
               ),
 
-              // ================== ✅ ADDED UI BLOCK END ==================
               const SizedBox(height: 18),
 
               Row(
@@ -477,7 +475,7 @@ class _HomepageState extends State<Homepage> {
                   ),
                   Switch(
                     value: eqEnabled,
-                    activeColor: Colors.greenAccent,
+                    activeThumbColor: Colors.greenAccent,
                     onChanged: (v) {
                       setState(() => eqEnabled = v);
                       _pushParamsDebounced();

@@ -1,27 +1,35 @@
+// AntiFeedbackAfs.swift
 import Foundation
 
-// MARK: - AntiFeedbackAfs (Android-aligned, 2-notch, hardened)
+// MARK: - AntiFeedbackAfs (speaker-default tuned)
 final class AntiFeedbackAfs {
 
     private let fs: Double
 
-    // Candidate ringing freqs (same as Android)
+    // 🔧 PATCH:
+    // Ưu tiên dải built-in speaker dễ ring / chói nhất
+    // bớt focus vào quá cao, thêm vùng thấp-mid hay hú trên phone speaker
     private let candidates: [Double] = [
-        2000.0, 2500.0, 3150.0, 4000.0, 5000.0, 6300.0, 8000.0, 10000.0
+        800.0, 1000.0, 1250.0, 1600.0, 2000.0, 2500.0, 3150.0, 4000.0, 5000.0
     ]
 
-    // ✅ FIX: only 2 notches (avoid boxy/roomy sound)
+    // ✅ giữ 2 notch để đỡ boxy
     private let notchCount = 2
     private var notch: [Biquad]
     private var notchF: [Double]
     private var notchUntilMs: [Int64]
 
-    // ✅ Android value
-    private let Q: Double = 8.0
+    // 🔧 PATCH:
+    // notch rộng hơn chút để trị ringing speaker tốt hơn
+    // Q thấp hơn = notch rộng hơn = bớt rít/chói hơn
+    private let Q: Double = 6.5
 
     // EMA baseline
     private var ema: [Double]
-    private let emaAlpha: Double = 0.90
+    private let emaAlpha: Double = 0.92
+
+    // 🔧 PATCH: giữ notch lâu hơn
+    private let holdMs: Int64 = 1200
 
     init(fs: Double) {
         self.fs = fs
@@ -52,7 +60,7 @@ final class AntiFeedbackAfs {
         return c
     }
 
-    // MARK: - Analyze Float32 directly (Android-like)
+    // MARK: - Analyze Float32 directly
     func analyzeFloat(input: UnsafePointer<Float>, count n: Int) {
         let now = Self.nowMs()
 
@@ -66,6 +74,7 @@ final class AntiFeedbackAfs {
 
         var bestK = -1
         var bestScore = 0.0
+
         for k in 0..<candidates.count {
             let score = e[k] / (ema[k] + 1e-9)
             if score > bestScore {
@@ -76,23 +85,26 @@ final class AntiFeedbackAfs {
 
         if bestK < 0 { return }
 
-        // ✅ HARDEN (match Android)
-        if bestScore < 14.0 { return }
-        if e[bestK] < 1.2e-5 { return }
-
         let f0 = candidates[bestK]
+        let bestEnergy = e[bestK]
 
-        // refresh existing notch
+        // 🔧 PATCH:
+        // Detect dễ hơn để chụp ringing sớm hơn
+        if bestScore < 6.5 { return }
+        if bestEnergy < 3e-6 { return }
+
+        // 🔧 PATCH:
+        // refresh notch đang có nếu gần tần số hiện tại hơn
         for i in 0..<notchCount {
             if notchF[i] > 0.0,
-               abs(notchF[i] - f0) < 140.0,
+               abs(notchF[i] - f0) < 180.0,
                now < notchUntilMs[i] {
-                notchUntilMs[i] = now + 650
+                notchUntilMs[i] = now + holdMs
                 return
             }
         }
 
-        // find free slot
+        // tìm slot rảnh
         var slot = -1
         for i in 0..<notchCount {
             if now >= notchUntilMs[i] {
@@ -100,17 +112,29 @@ final class AntiFeedbackAfs {
                 break
             }
         }
-        if slot < 0 { slot = 0 }
+
+        // nếu không có slot rảnh, thay slot có expiry sớm nhất
+        if slot < 0 {
+            var minUntil = notchUntilMs[0]
+            slot = 0
+            for i in 1..<notchCount {
+                if notchUntilMs[i] < minUntil {
+                    minUntil = notchUntilMs[i]
+                    slot = i
+                }
+            }
+        }
 
         notchF[slot] = f0
         notch[slot].setNotch(fs: fs, f0: f0, q: Q)
-        notchUntilMs[slot] = now + 650
+        notchUntilMs[slot] = now + holdMs
     }
 
     // MARK: - Process
     func process(_ xIn: Double) -> Double {
         var x = xIn
         let now = Self.nowMs()
+
         for i in 0..<notchCount {
             if notchF[i] > 0.0 && now < notchUntilMs[i] {
                 x = notch[i].process(x)

@@ -1,3 +1,4 @@
+// DspEq.swift
 import Foundation
 
 // MARK: - Biquad (Direct Form II)
