@@ -397,4 +397,6 @@ final class SpeakerFeedbackController {
         if speechActive { return false }
         return rawRms > 0.50 || rise > 0.18
     }
+
+    
 }

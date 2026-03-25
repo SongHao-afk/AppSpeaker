@@ -61,11 +61,11 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
   private let SPEAKER_VOICE_SR: Double = 48_000
 
-  // tăng gain base cho speaker
-  private let FIXED_GAIN_SPEAKER: Double = 0.34
+  // tăng gain base cho speaker (đã có AEC nên an toàn để max)
+  private let FIXED_GAIN_SPEAKER: Double = 0.75
   private let FIXED_GAIN_WIRED:   Double = 1.35
   private let FIXED_GAIN_HFP:     Double = 1.20
-  private let SPK_TOTAL_GAIN_CAP: Double = 0.52
+  private let SPK_TOTAL_GAIN_CAP: Double = 1.10
 
   private let A2DP_HPF_HZ: Double = 220.0
   private let A2DP_AFS_ANALYZE_MS: Double = 100.0
@@ -77,8 +77,8 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private let A2DP_GATE_ATTACK_MS: Double = 4.0
   private let A2DP_GATE_RELEASE_MS: Double = 260.0
 
-  private let SPK_HPF_HZ: Double = 150.0
-  private let SPK_LPF_HZ: Double = 2500.0
+  private let SPK_HPF_HZ: Double = 160.0
+  private let SPK_LPF_HZ: Double = 4000.0
   private let SPK_GATE_THR: Double = 0.030
   private let SPK_GATE_ATTACK_MS: Double = 2.0
   private let SPK_GATE_RELEASE_MS: Double = 120.0
@@ -637,7 +637,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     let mode: AVAudioSession.Mode
     if speakerDefaultNow {
-      mode = .default
+      mode = .default // Phải dùng raw mic, để iOS không chém sạch tiếng vì nhầm là echo dội về
     } else if voicePath {
       mode = .voiceChat
     } else {
@@ -699,11 +699,11 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
                       releaseMs: SPK_GATE_RELEASE_MS)
 
     expander = DownwardExpander(sampleRate: fs,
-                                threshold: 0.012,
-                                ratio: 1.45,
-                                attackMs: 8.0,
-                                releaseMs: 220.0,
-                                floorGain: 0.55)
+                                threshold: 0.015,
+                                ratio: 4.0,
+                                attackMs: 4.0,
+                                releaseMs: 150.0,
+                                floorGain: 0.10)
 
     afs = AntiFeedbackAfs(fs: fs)
 
@@ -721,7 +721,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     speechTracker = SpeechPresenceTracker(sampleRate: fs)
     speakerGuardCtl = SpeakerFeedbackController(
       guardMinSpeech: 0.55,
-      guardMinNonSpeech: 0.42,
+      guardMinNonSpeech: 0.20,
       hotRms: 0.22,
       riseThr: 0.090
     )
@@ -860,15 +860,15 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
       if inStartupGrace {
         if rawRms > 0.20 {
-          targetHarshMix = 0.08
+          targetHarshMix = 0.30
         } else {
-          targetHarshMix = 0.02
+          targetHarshMix = 0.05
         }
       } else if speechActive {
         if rawRms > 0.22 {
-          targetHarshMix = 0.12
+          targetHarshMix = 0.25
         } else if rawRms > 0.12 {
-          targetHarshMix = 0.08
+          targetHarshMix = 0.15
         } else {
           targetHarshMix = 0.02
         }
@@ -876,17 +876,17 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         if rawRms < 0.020 {
           targetHarshMix = 0.0
         } else if rawRms > 0.24 {
-          targetHarshMix = 0.22
+          targetHarshMix = 0.85
         } else if rawRms > 0.12 {
-          targetHarshMix = 0.14
+          targetHarshMix = 0.50
         } else if rawRms > 0.06 {
-          targetHarshMix = 0.08
+          targetHarshMix = 0.15
         } else {
-          targetHarshMix = 0.03
+          targetHarshMix = 0.05
         }
       }
 
-      let k = (targetHarshMix > harshMix) ? 0.08 : 0.04
+      let k = (targetHarshMix > harshMix) ? 0.15 : 0.04
       harshMix += (targetHarshMix - harshMix) * k
     } else {
       harshMix = 0.0
@@ -921,18 +921,18 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     if isSpeakerDefaultNow {
       if !speechActive && !inStartupGrace && rawRms > 0.22 {
-        combinedGain = min(combinedGain, 0.24)
+        combinedGain = min(combinedGain, 0.40)
       }
 
       combinedGain = min(combinedGain, SPK_TOTAL_GAIN_CAP)
 
       let floor: Double
       if inStartupGrace {
-        floor = 0.18
+        floor = 0.20
       } else if speechActive {
-        floor = 0.16
+        floor = 0.25
       } else {
-        floor = 0.08
+        floor = 0.12
       }
 
       combinedGain = max(combinedGain, floor)
@@ -994,7 +994,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
           x = afs?.process(x) ?? x
         }
 
-        if duckNow { x *= 0.82 }
+        if duckNow { x *= 0.35 }
 
         x *= combinedGain
 
@@ -1041,7 +1041,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
           x = afs?.process(x) ?? x
         }
 
-        if duckNow { x *= 0.82 }
+        if duckNow { x *= 0.35 }
 
         x *= combinedGain
 
