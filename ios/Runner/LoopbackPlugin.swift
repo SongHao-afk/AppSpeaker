@@ -51,6 +51,10 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private var lastVoicePath: Bool = false
   private var lastSampleRate: Double = 48_000
 
+  // FIX: giữ ý đồ "loa bluetooth A2DP + mic máy"
+  private var wantsBluetoothA2DPPlayback: Bool = false
+  private var lastNonVoiceA2dpTargetTs: Double = 0.0
+
   private let A2DP_SAFE_GAIN_CAP: Double = 0.70
   private let A2DP_TOTAL_GAIN_CAP: Double = 1.25
   private let FEEDBACK_RMS_THRESHOLD: Double = 0.20
@@ -183,7 +187,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     routeBtMic = r.inputs.contains { $0.portType == .bluetoothHFP }
   }
 
-  private func liveRouteFlags() -> (a2dp: Bool, wired: Bool, btHfp: Bool, outIsSpeaker: Bool) {
+  private func liveRouteFlags() -> (a2dp: Bool, wired: Bool, btHfp: Bool, outIsSpeaker: Bool, outIsReceiver: Bool) {
     let r = session.currentRoute
     let a2dp = r.outputs.contains { $0.portType == .bluetoothA2DP }
     let wiredOut = r.outputs.contains { $0.portType == .headphones || $0.portType == .usbAudio }
@@ -191,7 +195,18 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     let wired = wiredOut || wiredIn
     let btHfp = r.inputs.contains { $0.portType == .bluetoothHFP }
     let outIsSpeaker = r.outputs.contains { $0.portType == .builtInSpeaker }
-    return (a2dp, wired, btHfp, outIsSpeaker)
+    let outIsReceiver = r.outputs.contains { $0.portType == .builtInReceiver }
+    return (a2dp, wired, btHfp, outIsSpeaker, outIsReceiver)
+  }
+
+  private func hasBluetoothA2dpOutputAvailable() -> Bool {
+    session.currentRoute.outputs.contains { $0.portType == .bluetoothA2DP }
+  }
+
+  private func preferredBuiltInMic() -> AVAudioSessionPortDescription? {
+    session.availableInputs?.first {
+      $0.portType == .builtInMic
+    }
   }
 
   private func prepareFreePool(frames: Int, mono: AVAudioFormat) {
@@ -416,6 +431,11 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     updateRouteCache()
 
+    wantsBluetoothA2DPPlayback = (!voiceMode) && routeA2dp
+    if wantsBluetoothA2DPPlayback {
+      lastNonVoiceA2dpTargetTs = nowMs()
+    }
+
     if voiceMode && !routeBtMic {
       startLoopback(voiceMode: false)
       return
@@ -456,6 +476,9 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     pendingStartToken += 1
     running = false
     isStoppingNow = true
+
+    wantsBluetoothA2DPPlayback = false
+    lastNonVoiceA2dpTargetTs = 0.0
 
     guardGain = 1.0
     monitorGain = 1.0
@@ -522,7 +545,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     lastSampleRate = sampleRate
 
     updateRouteCache()
-    a2dpFlag = (!voicePath) && routeA2dp && !routeWired
+    a2dpFlag = (!voicePath) && (routeA2dp || wantsBluetoothA2DPPlayback) && !routeWired
 
     do {
       try configureSession(voicePath: voicePath, sampleRate: sampleRate)
@@ -624,24 +647,36 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private func configureSession(voicePath: Bool, sampleRate: Double) throws {
     let beforePerm = session.recordPermission
     log("⚙️[configureSession] BEGIN voicePath=\(voicePath) sampleRate=\(sampleRate) duck=\(duckOthersEnabled) perm=\(permStr(beforePerm))")
-    log("🔥 BUILD_TAG=2026-03-24-SPK-ECHOREDUCER-PRESENCE-SMOOTHER SPEAKER_VOICE_SR=\(SPEAKER_VOICE_SR) FIXED_GAIN_SPEAKER=\(FIXED_GAIN_SPEAKER)")
+    log("🔥 BUILD_TAG=2026-03-26-BT-A2DP-STICKY-MIC-FIX SPEAKER_VOICE_SR=\(SPEAKER_VOICE_SR) FIXED_GAIN_SPEAKER=\(FIXED_GAIN_SPEAKER)")
     log("🔥 FILE=\(#file) LINE=\(#line)")
     logSession("beforeConfigure")
 
     let flags = liveRouteFlags()
     let wiredNow = flags.wired
-    let a2dpNow  = flags.a2dp
+    let a2dpNow  = flags.a2dp || (wantsBluetoothA2DPPlayback && !voicePath)
     let btHfpNow = flags.btHfp
     let outIsSpeaker = flags.outIsSpeaker
 
     let speakerDefaultNow = voicePath && outIsSpeaker && !btHfpNow && !wiredNow && !a2dpNow
 
-    log("⚙️[configureSession] flags wired=\(wiredNow) a2dp=\(a2dpNow) btHfp=\(btHfpNow) outIsSpeaker=\(outIsSpeaker) speakerDefaultNow=\(speakerDefaultNow)")
+    log("⚙️[configureSession] flags wired=\(wiredNow) a2dp=\(a2dpNow) btHfp=\(btHfpNow) outIsSpeaker=\(outIsSpeaker) speakerDefaultNow=\(speakerDefaultNow) wantsBluetoothA2DPPlayback=\(wantsBluetoothA2DPPlayback)")
 
-    var options: AVAudioSession.CategoryOptions = [.allowBluetooth]
-    if !voicePath { options.insert(.allowBluetoothA2DP) }
+    var options: AVAudioSession.CategoryOptions = []
     if duckOthersEnabled { options.insert(.duckOthers) }
-    if speakerDefaultNow { options.insert(.defaultToSpeaker) }
+
+    if voicePath {
+      options.insert(.allowBluetooth)
+    } else if a2dpNow {
+      // FIX: case A2DP chỉ cho A2DP, không cho HFP chen vào
+      options.insert(.allowBluetoothA2DP)
+    } else {
+      options.insert(.allowBluetooth)
+      options.insert(.allowBluetoothA2DP)
+    }
+
+    if speakerDefaultNow {
+      options.insert(.defaultToSpeaker)
+    }
 
     let mode: AVAudioSession.Mode
     if speakerDefaultNow {
@@ -661,7 +696,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       try session.setPreferredIOBufferDuration(0.010)
     } else if a2dpNow && !voicePath {
       try session.setPreferredSampleRate(44_100)
-      try session.setPreferredIOBufferDuration(0.030)
+      try session.setPreferredIOBufferDuration(0.023)
     } else {
       try session.setPreferredSampleRate(sampleRate)
       try session.setPreferredIOBufferDuration(voicePath ? 0.008 : 0.010)
@@ -671,8 +706,13 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       if let wired = session.availableInputs?.first(where: { $0.portType == .headsetMic || $0.portType == .usbAudio }) {
         try? session.setPreferredInput(wired)
       }
-    }
-    if voicePath {
+    } else if a2dpNow && !voicePath {
+      // FIX: phát A2DP thì ép mic máy, tránh tụt sang HFP 8k
+      if let builtIn = preferredBuiltInMic() {
+        try? session.setPreferredInput(builtIn)
+        log("🎙️[configureSession] preferred built-in mic for A2DP path")
+      }
+    } else if voicePath {
       if let hfp = session.availableInputs?.first(where: { $0.portType == .bluetoothHFP }) {
         try? session.setPreferredInput(hfp)
       }
@@ -688,6 +728,15 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     }
 
     updateRouteCache()
+
+    // FIX: nếu đang muốn A2DP mà sau active vẫn bị kéo sang HFP/receiver thì ép lại 1 lần nữa
+    if a2dpNow && !voicePath {
+      if let builtIn = preferredBuiltInMic() {
+        try? session.setPreferredInput(builtIn)
+      }
+      updateRouteCache()
+      log("🎧[A2DP-FIX] route after A2DP configure = \(routeStr(session.currentRoute))")
+    }
 
     log("⚙️[configureSession] END perm=\(permStr(session.recordPermission)) speakerDefaultNow=\(speakerDefaultNow)")
     logSession("afterConfigure")
@@ -781,7 +830,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     if (now - lastA2dpCheckTs) > 500 {
       lastA2dpCheckTs = now
-      let newFlag = (!voicePath) && routeA2dp && !routeWired
+      let newFlag = (!voicePath) && (routeA2dp || wantsBluetoothA2DPPlayback) && !routeWired
       if newFlag != a2dpFlag {
         a2dpFlag = newFlag
         guardGain = 1.0
@@ -935,6 +984,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       if isSpeakerDefaultNow { return FIXED_GAIN_SPEAKER }
       if routeBtMic && voicePath { return FIXED_GAIN_HFP }
       if routeWired { return FIXED_GAIN_WIRED }
+      if a2dpFlag { return 1.0 }
       return 1.0
     }()
 
@@ -949,6 +999,9 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     let userOutGain: Double = {
       if isSpeakerDefaultNow {
         return clamp(outputGain, 0.90, 1.18)
+      }
+      if a2dpFlag {
+        return clamp(outputGain, 0.70, 1.30)
       }
       return clamp(outputGain, 0.0, 6.0)
     }()
@@ -981,7 +1034,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     if now - lastGuardLogTs > 1000 {
       lastGuardLogTs = now
-      log("🎛️[GAIN] speakerDefault=\(isSpeakerDefaultNow) speech=\(speechActive) speechScore=\(String(format: "%.2f", lastSpeechScore)) zcr=\(String(format: "%.3f", lastZcr)) startupGrace=\(inStartupGrace) rawRms=\(String(format: "%.3f", rawRms)) rise=\(String(format: "%.3f", rise)) base=\(String(format: "%.2f", baseGain)) guard=\(String(format: "%.3f", guardGain)) monitor=\(String(format: "%.3f", monitorGain)) preDuck=\(String(format: "%.3f", preDuckGain)) expander=\(String(format: "%.3f", expanderGain)) harshMix=\(String(format: "%.2f", harshMix)) echoCancel=\(String(format: "%.2f", lastEchoCancelGain)) echoDelayMs=\(String(format: "%.1f", lastEchoDelayMs)) presence=\(String(format: "%.2f", lastPresenceMix)) combined=\(String(format: "%.4f", combinedGain))")
+      log("🎛️[GAIN] speakerDefault=\(isSpeakerDefaultNow) a2dp=\(a2dpFlag) speech=\(speechActive) speechScore=\(String(format: "%.2f", lastSpeechScore)) zcr=\(String(format: "%.3f", lastZcr)) startupGrace=\(inStartupGrace) rawRms=\(String(format: "%.3f", rawRms)) rise=\(String(format: "%.3f", rise)) base=\(String(format: "%.2f", baseGain)) guard=\(String(format: "%.3f", guardGain)) monitor=\(String(format: "%.3f", monitorGain)) preDuck=\(String(format: "%.3f", preDuckGain)) expander=\(String(format: "%.3f", expanderGain)) harshMix=\(String(format: "%.2f", harshMix)) echoCancel=\(String(format: "%.2f", lastEchoCancelGain)) echoDelayMs=\(String(format: "%.1f", lastEchoDelayMs)) presence=\(String(format: "%.2f", lastPresenceMix)) combined=\(String(format: "%.4f", combinedGain)) route=\(routeStr(session.currentRoute))")
     }
 
     guard let mono = monoFormat else { return }
@@ -1295,18 +1348,44 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         targetVoicePath = true
       }
     } else {
-      if routeA2dp {
-        targetSampleRate = 44_100
-        targetVoicePath = false
-      } else if routeBtMic {
-        targetSampleRate = 16_000
-        targetVoicePath = true
-      } else if !routeWired {
-        targetSampleRate = SPEAKER_VOICE_SR
-        targetVoicePath = true
+      // FIX: nếu user start kiểu thường mà ban đầu muốn A2DP
+      // thì không cho transient HFP cướp path sang voiceChat
+      if wantsBluetoothA2DPPlayback {
+        if routeA2dp {
+          targetSampleRate = 44_100
+          targetVoicePath = false
+          lastNonVoiceA2dpTargetTs = now
+        } else if routeBtMic && (now - lastNonVoiceA2dpTargetTs) < 1800.0 {
+          log("🛡️[RouteChange] ignore transient HFP, keep trying A2DP playback path")
+          targetSampleRate = 44_100
+          targetVoicePath = false
+        } else if !routeWired && !routeBtMic {
+          targetSampleRate = 44_100
+          targetVoicePath = false
+        } else if routeBtMic {
+          targetSampleRate = 16_000
+          targetVoicePath = true
+        } else if !routeWired {
+          targetSampleRate = SPEAKER_VOICE_SR
+          targetVoicePath = true
+        } else {
+          targetSampleRate = 48_000
+          targetVoicePath = false
+        }
       } else {
-        targetSampleRate = 48_000
-        targetVoicePath = false
+        if routeA2dp {
+          targetSampleRate = 44_100
+          targetVoicePath = false
+        } else if routeBtMic {
+          targetSampleRate = 16_000
+          targetVoicePath = true
+        } else if !routeWired {
+          targetSampleRate = SPEAKER_VOICE_SR
+          targetVoicePath = true
+        } else {
+          targetSampleRate = 48_000
+          targetVoicePath = false
+        }
       }
     }
 

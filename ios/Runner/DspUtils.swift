@@ -628,7 +628,3 @@ final class PresenceSmoother {
 
     func currentMix() -> Double { mix }
 }
-
-
-
-// MARK: - Biquad (Direct Form II)
