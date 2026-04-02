@@ -278,7 +278,7 @@ final class SpeechPresenceTracker {
 
         let strongSpeech = (rms >= rmsOn && zcr >= zcrMin && zcr <= zcrMax)
         let weakSpeech = (rms >= rmsOff && zcr >= zcrMin * 0.6 && zcr <= zcrMax * 1.25)
-        let voicedLike = (rms >= 0.030 && zcr <= 0.08)
+        let voicedLike = (rms >= 0.060 && zcr <= 0.08)
 
         let target: Double
         if strongSpeech {
@@ -356,15 +356,15 @@ final class SpeakerFeedbackController {
             preDuckGain += (targetPreDuck - preDuckGain) * (targetPreDuck < preDuckGain ? 0.18 : 0.05)
 
             if veryHot && rising {
-                duckUntilMs = nowMs + 260.0
-                guardGain *= 0.82
+                duckUntilMs = nowMs + 350.0
+                guardGain *= 0.72
             } else if hot && rising {
-                duckUntilMs = nowMs + 180.0
-                guardGain *= 0.88
+                duckUntilMs = nowMs + 250.0
+                guardGain *= 0.80
             } else if hot {
-                guardGain *= 0.93
+                guardGain *= 0.88
             } else {
-                guardGain += (0.96 - guardGain) * 0.040
+                guardGain += (0.94 - guardGain) * 0.032
             }
 
             if guardGain < guardMinSpeech { guardGain = guardMinSpeech }
@@ -376,15 +376,15 @@ final class SpeakerFeedbackController {
             preDuckGain += (targetPreDuck - preDuckGain) * (targetPreDuck < preDuckGain ? 0.22 : 0.05)
 
             if veryHot && rising {
-                duckUntilMs = nowMs + 420.0
-                guardGain *= 0.68
+                duckUntilMs = nowMs + 480.0
+                guardGain *= 0.58
             } else if hot && rising {
-                duckUntilMs = nowMs + 320.0
-                guardGain *= 0.76
+                duckUntilMs = nowMs + 380.0
+                guardGain *= 0.66
             } else if hot {
-                guardGain *= 0.86
+                guardGain *= 0.78
             } else {
-                guardGain += (0.94 - guardGain) * 0.030
+                guardGain += (0.90 - guardGain) * 0.022
             }
 
             if guardGain < guardMinNonSpeech { guardGain = guardMinNonSpeech }
@@ -450,7 +450,7 @@ final class AdaptiveEchoReducer {
         let cap = Int(sampleRate * 0.20)
         self.ref = CircularFloatDelayBuffer(capacity: cap)
 
-        let msCandidates: [Double] = [10, 14, 18, 22, 28, 34, 42, 52, 64]
+        let msCandidates: [Double] = [10, 14, 18, 22, 28, 34, 42, 52, 64, 80, 100, 128]
         self.candidateDelays = msCandidates.map { Int(sampleRate * ($0 / 1000.0)) }
         self.corrEma = Array(repeating: 1e-6, count: msCandidates.count)
         self.refEma = Array(repeating: 1e-6, count: msCandidates.count)
@@ -519,25 +519,25 @@ final class AdaptiveEchoReducer {
 
         let target: Double
         if startupGrace {
-            target = min(0.22, absRef * 0.40)
+            target = min(0.36, absRef * 0.55)
         } else if speechActive {
-            target = min(0.26, absRef * 0.34 + corr * 0.08)
+            target = min(0.42, absRef * 0.50 + corr * 0.12)
         } else {
-            target = min(0.42, absRef * 0.56 + corr * 0.12)
+            target = min(0.60, absRef * 0.70 + corr * 0.16)
         }
 
         let up = target > gainFast ? 0.12 : 0.02
         gainFast += (target - gainFast) * up
         gainSlow += (gainFast - gainSlow) * 0.04
 
-        let cancelGain = speechActive ? min(gainSlow, 0.22) : min(gainSlow, 0.36)
+        let cancelGain = speechActive ? min(gainSlow, 0.45) : min(gainSlow, 0.65)
 
         x = x - cancelGain * r
 
-        if !speechActive && absRef > 0.025 {
+        if !speechActive && absRef > 0.030 {
             let residual = abs(x)
-            if residual < absRef * 0.65 {
-                x *= 0.76
+            if residual < absRef * 0.70 {
+                x *= 0.65
             }
         }
 
