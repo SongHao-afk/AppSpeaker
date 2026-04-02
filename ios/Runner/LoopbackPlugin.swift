@@ -138,7 +138,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private var harshMix: Double = 0.0
   private var preDuckGain: Double = 1.0
   private var expanderGain: Double = 1.0
-  private var speechGainSmooth: Double = 1.0
 
   private var lastRms: Double = 0.0
   private var lastGuardLogTs: Double = 0.0
@@ -486,7 +485,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     harshMix = 0.0
     preDuckGain = 1.0
     expanderGain = 1.0
-    speechGainSmooth = 1.0
     lastRms = 0.0
     lastGuardLogTs = 0.0
     lastMeterTs = 0.0
@@ -778,13 +776,13 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
                             releaseMs: 220.0)
 
     speechTracker = SpeechPresenceTracker(sampleRate: fs,
-                                         rmsOn: 0.045,
-                                         rmsOff: 0.025,
+                                         rmsOn: 0.050,
+                                         rmsOff: 0.030,
                                          zcrMin: 0.005,
                                          zcrMax: 0.26,
-                                         attackMs: 2.0,
-                                         releaseMs: 50.0,
-                                         hangMs: 150.0)
+                                         attackMs: 3.0,
+                                         releaseMs: 40.0,
+                                         hangMs: 80.0)
     speakerGuardCtl = SpeakerFeedbackController(
       guardMinSpeech: 0.60,
       guardMinNonSpeech: 0.10,
@@ -882,9 +880,8 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       let speechInfo = st.analyze(buf: ch0, count: n, nowMs: now)
       speechActive = speechInfo.active
 
-      // Echo override: chỉ nhận là echo khi RMS rất thấp (< 0.035)
-      // Giữ khoảng trống giữa các âm tiết (0.035-0.060) như speech
-      if speechActive && rawRms < 0.035 {
+      // Echo override: echo từ loa có RMS ~0.02-0.04, ép non-speech để triệt
+      if speechActive && rawRms < 0.055 {
         speechActive = false
       }
       // Chỉ coi là speech khi RMS đủ cao (giọng nói trực tiếp)
@@ -1028,15 +1025,14 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
                        guardGain * micBoost * monitorGain * preDuckGain * expanderGain
 
     if isSpeakerDefaultNow {
-      // Smooth gain transition: ramp up nhanh (0.25), ramp down chậm (0.06)
-      // Tránh click/pop khi gain nhảy đột ngột
-      let speechTarget = speechActive ? 1.0 : 0.06
-      let smoothK = speechActive ? 0.25 : 0.06
-      speechGainSmooth += (speechTarget - speechGainSmooth) * smoothK
-
-      combinedGain *= speechGainSmooth
-      combinedGain = min(combinedGain, SPK_TOTAL_GAIN_CAP)
-      combinedGain = max(combinedGain, 0.01)
+      if speechActive {
+        // Khi đang nói: gain cao, chỉ cap nhẹ để tránh clipping
+        combinedGain = min(combinedGain, SPK_TOTAL_GAIN_CAP)
+        combinedGain = max(combinedGain, 0.20)
+      } else {
+        // Khi NGƯNG NÓI: cắt gain cực nhanh để triệt echo
+        combinedGain = min(combinedGain, 0.04)
+      }
     }
 
     if a2dpFlag { combinedGain = min(combinedGain, A2DP_TOTAL_GAIN_CAP) }
