@@ -121,9 +121,9 @@ final class Eq5Band {
         guard db.count >= 5 else { return }
 
         low.setLowShelf(fs: fs, f0: 60.0, slope: 1.0, gainDb: db[0])
-        m1.setPeaking(fs: fs, f0: 230.0, q: 1.0, gainDb: db[1])
-        m2.setPeaking(fs: fs, f0: 910.0, q: 1.0, gainDb: db[2])
-        m3.setPeaking(fs: fs, f0: 3600.0, q: 1.0, gainDb: db[3])
+        m1.setPeaking(fs: fs, f0: 230.0, q: 0.707, gainDb: db[1])
+        m2.setPeaking(fs: fs, f0: 910.0, q: 0.707, gainDb: db[2])
+        m3.setPeaking(fs: fs, f0: 3600.0, q: 0.707, gainDb: db[3])
 
         let nyq = fs * 0.5
         let fHigh = min(9000.0, nyq * 0.82)

@@ -51,24 +51,24 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private var lastVoicePath: Bool = false
   private var lastSampleRate: Double = 48_000
 
-  // FIX: giữ ý đồ "loa bluetooth A2DP + mic máy"
   private var wantsBluetoothA2DPPlayback: Bool = false
   private var lastNonVoiceA2dpTargetTs: Double = 0.0
 
-  private let A2DP_SAFE_GAIN_CAP: Double = 0.70
-  private let A2DP_TOTAL_GAIN_CAP: Double = 1.25
-  private let FEEDBACK_RMS_THRESHOLD: Double = 0.20
-  private let FEEDBACK_RISE_THRESHOLD: Double = 0.045
+  private let A2DP_SAFE_GAIN_CAP: Double = 1.35
+  private let A2DP_TOTAL_GAIN_CAP: Double = 2.40
+  private let FEEDBACK_RMS_THRESHOLD: Double = 0.18
+  private let FEEDBACK_RISE_THRESHOLD: Double = 0.035
   private let GUARD_MIN: Double = 0.05
   private let A2DP_MUTE_MS: Double = 40.0
   private let A2DP_HARD_MUTE_RMS: Double = 0.55
 
   private let SPEAKER_VOICE_SR: Double = 48_000
 
-  private let FIXED_GAIN_SPEAKER: Double = 0.65
-  private let FIXED_GAIN_WIRED:   Double = 1.35
-  private let FIXED_GAIN_HFP:     Double = 1.20
-  private let SPK_TOTAL_GAIN_CAP: Double = 0.80
+  // Tăng tiếng âm thanh output theo yêu cầu
+  private let FIXED_GAIN_SPEAKER: Double = 1.85
+  private let FIXED_GAIN_WIRED:   Double = 2.80
+  private let FIXED_GAIN_HFP:     Double = 2.50
+  private let SPK_TOTAL_GAIN_CAP: Double = 2.20
 
   private let A2DP_HPF_HZ: Double = 220.0
   private let A2DP_AFS_ANALYZE_MS: Double = 100.0
@@ -647,7 +647,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private func configureSession(voicePath: Bool, sampleRate: Double) throws {
     let beforePerm = session.recordPermission
     log("⚙️[configureSession] BEGIN voicePath=\(voicePath) sampleRate=\(sampleRate) duck=\(duckOthersEnabled) perm=\(permStr(beforePerm))")
-    log("🔥 BUILD_TAG=2026-03-26-BT-A2DP-STICKY-MIC-FIX SPEAKER_VOICE_SR=\(SPEAKER_VOICE_SR) FIXED_GAIN_SPEAKER=\(FIXED_GAIN_SPEAKER)")
+    log("🔥 BUILD_TAG=2026-04-02-SPK-DEFAULT-VOLUME-UP SPEAKER_VOICE_SR=\(SPEAKER_VOICE_SR) FIXED_GAIN_SPEAKER=\(FIXED_GAIN_SPEAKER)")
     log("🔥 FILE=\(#file) LINE=\(#line)")
     logSession("beforeConfigure")
 
@@ -667,7 +667,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     if voicePath {
       options.insert(.allowBluetooth)
     } else if a2dpNow {
-      // FIX: case A2DP chỉ cho A2DP, không cho HFP chen vào
       options.insert(.allowBluetoothA2DP)
     } else {
       options.insert(.allowBluetooth)
@@ -707,7 +706,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         try? session.setPreferredInput(wired)
       }
     } else if a2dpNow && !voicePath {
-      // FIX: phát A2DP thì ép mic máy, tránh tụt sang HFP 8k
       if let builtIn = preferredBuiltInMic() {
         try? session.setPreferredInput(builtIn)
         log("🎙️[configureSession] preferred built-in mic for A2DP path")
@@ -729,7 +727,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     updateRouteCache()
 
-    // FIX: nếu đang muốn A2DP mà sau active vẫn bị kéo sang HFP/receiver thì ép lại 1 lần nữa
     if a2dpNow && !voicePath {
       if let builtIn = preferredBuiltInMic() {
         try? session.setPreferredInput(builtIn)
@@ -765,29 +762,30 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     afs = AntiFeedbackAfs(fs: fs)
 
     comp = SimpleCompressor(sampleRate: fs,
-                            threshold: 0.060,
-                            ratio: 2.8,
-                            attackMs: 1.2,
-                            releaseMs: 210.0)
+                            threshold: 0.40,
+                            ratio: 2.0,
+                            attackMs: 2.0,
+                            releaseMs: 150.0)
 
     limiter = SimpleLimiter(sampleRate: fs,
-                            threshold: 0.31,
+                            threshold: 0.65,
                             attackMs: 0.08,
                             releaseMs: 220.0)
 
     speechTracker = SpeechPresenceTracker(sampleRate: fs,
-                                         rmsOn: 0.050,
-                                         rmsOff: 0.030,
-                                         zcrMin: 0.005,
-                                         zcrMax: 0.26,
-                                         attackMs: 3.0,
-                                         releaseMs: 40.0,
-                                         hangMs: 80.0)
+                                         rmsOn: 0.055,
+                                         rmsOff: 0.032,
+                                         zcrMin: 0.006,
+                                         zcrMax: 0.22,
+                                         attackMs: 4.0,
+                                         releaseMs: 65.0,
+                                         hangMs: 70.0)
+
     speakerGuardCtl = SpeakerFeedbackController(
-      guardMinSpeech: 0.60,
-      guardMinNonSpeech: 0.10,
-      hotRms: 0.080,
-      riseThr: 0.020
+      guardMinSpeech: 0.58,
+      guardMinNonSpeech: 0.12,
+      hotRms: 0.078,
+      riseThr: 0.018
     )
 
     echoReducer = AdaptiveEchoReducer(sampleRate: fs)
@@ -880,12 +878,10 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       let speechInfo = st.analyze(buf: ch0, count: n, nowMs: now)
       speechActive = speechInfo.active
 
-      // Echo override: echo từ loa có RMS ~0.02-0.04, ép non-speech để triệt
-      if speechActive && rawRms < 0.055 {
+      if speechActive && rawRms < 0.050 {
         speechActive = false
       }
-      // Chỉ coi là speech khi RMS đủ cao (giọng nói trực tiếp)
-      if !speechActive && rawRms > 0.060 && speechInfo.zcr < 0.085 {
+      if !speechActive && rawRms > 0.065 && speechInfo.zcr < 0.080 {
         speechActive = true
       }
 
@@ -922,17 +918,17 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     } else if isSpeakerDefaultNow {
       if let ctl = speakerGuardCtl {
         ctl.update(rawRms: rawRms, rise: rise, speechActive: speechActive, nowMs: now, startupGrace: inStartupGrace)
+
+        monitorGain = ctl.monitorGain
+        preDuckGain = ctl.preDuckGain
+        guardGain = ctl.guardGain
+
         if speechActive {
-          // Khi đang nói: BYPASS tất cả gain control, chỉ dùng echo canceller
-          monitorGain = 1.0
-          preDuckGain = 1.0
-          guardGain = 1.0
-        } else {
-          // Khi ngưng nói: để guard controller quản lý gain
-          monitorGain = ctl.monitorGain
-          preDuckGain = ctl.preDuckGain
-          guardGain = ctl.guardGain
+          monitorGain = min(monitorGain, 0.97)
+          preDuckGain = min(preDuckGain, 0.98)
+          guardGain = min(guardGain, 1.00)
         }
+
         duckUntilTs = max(duckUntilTs, ctl.duckUntilMs)
       } else {
         monitorGain = 1.0
@@ -1013,7 +1009,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     let userOutGain: Double = {
       if isSpeakerDefaultNow {
-        return clamp(outputGain, 0.80, 2.0)
+        return clamp(outputGain, 1.00, 2.20)
       }
       if a2dpFlag {
         return clamp(outputGain, 0.70, 1.30)
@@ -1026,12 +1022,10 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     if isSpeakerDefaultNow {
       if speechActive {
-        // Khi đang nói: gain cao, chỉ cap nhẹ để tránh clipping
-        combinedGain = min(combinedGain, SPK_TOTAL_GAIN_CAP)
-        combinedGain = max(combinedGain, 0.20)
+        combinedGain = min(combinedGain, 0.42)
+        combinedGain = max(combinedGain, 0.14)
       } else {
-        // Khi NGƯNG NÓI: cắt gain cực nhanh để triệt echo
-        combinedGain = min(combinedGain, 0.04)
+        combinedGain = min(combinedGain, 0.075)
       }
     }
 
@@ -1315,9 +1309,20 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     lastBands = bb
 
+    // Chống vọng khi người dùng cố tình đẩy tất cả các thanh EQ lên max
+    // Tự động triệt tiêu lượng gain tổng dư thừa (Auto Makeup Reduction)
+    var sumLinear = 0.0
+    for i in 0..<5 { sumLinear += bb[i] }
+    let avgLinear = sumLinear / 5.0
+
+    var makeup = 1.0
+    if avgLinear > 1.25 {
+        makeup = 1.25 / avgLinear
+    }
+
     var db = [Double](repeating: 0, count: 5)
     for i in 0..<5 {
-      let gi = max(0.0001, bb[i])
+      let gi = max(0.0001, bb[i] * makeup)
       db[i] = 20.0 * log10(gi)
     }
 
@@ -1353,8 +1358,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         targetVoicePath = true
       }
     } else {
-      // FIX: nếu user start kiểu thường mà ban đầu muốn A2DP
-      // thì không cho transient HFP cướp path sang voiceChat
       if wantsBluetoothA2DPPlayback {
         if routeA2dp {
           targetSampleRate = 44_100

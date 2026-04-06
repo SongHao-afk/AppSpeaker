@@ -349,20 +349,20 @@ final class SpeakerFeedbackController {
         }
 
         if speechActive {
-            let targetMonitor = rawRms > 0.028 ? 0.72 : 0.88
-            let targetPreDuck = rawRms > 0.060 ? 0.82 : 0.92
+            let targetMonitor = rawRms > 0.028 ? 0.76 : 0.90
+            let targetPreDuck = rawRms > 0.060 ? 0.86 : 0.94
 
-            monitorGain += (targetMonitor - monitorGain) * (targetMonitor < monitorGain ? 0.16 : 0.05)
-            preDuckGain += (targetPreDuck - preDuckGain) * (targetPreDuck < preDuckGain ? 0.18 : 0.05)
+            monitorGain += (targetMonitor - monitorGain) * (targetMonitor < monitorGain ? 0.18 : 0.05)
+            preDuckGain += (targetPreDuck - preDuckGain) * (targetPreDuck < preDuckGain ? 0.20 : 0.05)
 
             if veryHot && rising {
-                duckUntilMs = nowMs + 350.0
-                guardGain *= 0.72
+                duckUntilMs = nowMs + 320.0
+                guardGain *= 0.74
             } else if hot && rising {
-                duckUntilMs = nowMs + 250.0
-                guardGain *= 0.80
+                duckUntilMs = nowMs + 240.0
+                guardGain *= 0.82
             } else if hot {
-                guardGain *= 0.88
+                guardGain *= 0.90
             } else {
                 guardGain += (0.94 - guardGain) * 0.032
             }
@@ -377,12 +377,12 @@ final class SpeakerFeedbackController {
 
             if veryHot && rising {
                 duckUntilMs = nowMs + 480.0
-                guardGain *= 0.58
+                guardGain *= 0.65
             } else if hot && rising {
                 duckUntilMs = nowMs + 380.0
-                guardGain *= 0.66
+                guardGain *= 0.75
             } else if hot {
-                guardGain *= 0.78
+                guardGain *= 0.85
             } else {
                 guardGain += (0.90 - guardGain) * 0.022
             }
@@ -460,8 +460,8 @@ final class AdaptiveEchoReducer {
     func reset() {
         ref.reset()
         for i in 0..<corrEma.count {
-            corrEma[i] = 1e-6
-            refEma[i] = 1e-6
+          corrEma[i] = 1e-6
+          refEma[i] = 1e-6
         }
         micEma = 1e-6
         gainFast = 0.0
@@ -519,25 +519,25 @@ final class AdaptiveEchoReducer {
 
         let target: Double
         if startupGrace {
-            target = min(0.36, absRef * 0.55)
+            target = min(0.55, absRef * 0.75)
         } else if speechActive {
-            target = min(0.42, absRef * 0.50 + corr * 0.12)
+            target = min(0.65, absRef * 0.70 + corr * 0.20)
         } else {
-            target = min(0.60, absRef * 0.70 + corr * 0.16)
+            target = min(0.85, absRef * 0.90 + corr * 0.25)
         }
 
-        let up = target > gainFast ? 0.12 : 0.02
+        let up = target > gainFast ? 0.18 : 0.02
         gainFast += (target - gainFast) * up
-        gainSlow += (gainFast - gainSlow) * 0.04
+        gainSlow += (gainFast - gainSlow) * 0.06
 
-        let cancelGain = speechActive ? min(gainSlow, 0.45) : min(gainSlow, 0.65)
+        let cancelGain = speechActive ? min(gainSlow, 0.60) : min(gainSlow, 0.85)
 
         x = x - cancelGain * r
 
-        if !speechActive && absRef > 0.030 {
+        if !speechActive && absRef > 0.025 {
             let residual = abs(x)
-            if residual < absRef * 0.70 {
-                x *= 0.65
+            if residual < absRef * 0.85 {
+                x *= 0.45
             }
         }
 
