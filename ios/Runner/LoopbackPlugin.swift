@@ -305,7 +305,9 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       result(nil)
 
     case "stop":
-      stopLoopback()
+      audioQueue.async { [weak self] in
+        self?.stopLoopback()
+      }
       result(nil)
 
     case "setParams":
@@ -420,7 +422,9 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         self.log("❌ Microphone permission denied -> cannot start loopback")
         return
       }
-      self._startLoopbackInternal(voiceMode: voiceMode)
+      self.audioQueue.async {
+        self._startLoopbackInternal(voiceMode: voiceMode)
+      }
     }
   }
 
@@ -1447,10 +1451,15 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     if type == .began {
       log("⛔️[Interruption] began -> stop")
-      stopLoopback()
+      audioQueue.async { [weak self] in
+        self?.stopLoopback()
+      }
     } else {
       log("▶️[Interruption] ended -> restart")
-      startLoopback(voiceMode: lastVoiceModeRequested)
+      let voiceMode = lastVoiceModeRequested
+      DispatchQueue.main.async { [weak self] in
+        self?.startLoopback(voiceMode: voiceMode)
+      }
     }
   }
 
