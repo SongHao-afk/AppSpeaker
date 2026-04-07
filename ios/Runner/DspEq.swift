@@ -1,6 +1,5 @@
 import Foundation
 
-// MARK: - Biquad (Direct Form II)
 final class Biquad {
     private var b0: Double = 1.0
     private var b1: Double = 0.0
@@ -23,8 +22,10 @@ final class Biquad {
         z2 = 0.0
     }
 
-    private func setNorm(b0u: Double, b1u: Double, b2u: Double,
-                         a0u: Double, a1u: Double, a2u: Double) {
+    private func setNorm(
+        b0u: Double, b1u: Double, b2u: Double,
+        a0u: Double, a1u: Double, a2u: Double
+    ) {
         let inv = 1.0 / a0u
         b0 = b0u * inv
         b1 = b1u * inv
@@ -111,18 +112,21 @@ final class Eq5Band {
     private let m3  = Biquad()
     private let high = Biquad()
 
-    init(fs: Double) { self.fs = fs }
+    init(fs: Double) {
+        self.fs = fs
+    }
 
+    /// db length=5: [low, m1, m2, m3, high]
     func updateGainsDb(_ db: [Double]) {
         guard db.count >= 5 else { return }
 
         low.setLowShelf(fs: fs, f0: 60.0, slope: 1.0, gainDb: db[0])
-        m1.setPeaking(fs: fs, f0: 230.0, q: 1.0, gainDb: db[1])
-        m2.setPeaking(fs: fs, f0: 910.0, q: 1.0, gainDb: db[2])
-        m3.setPeaking(fs: fs, f0: 3600.0, q: 1.0, gainDb: db[3])
+        m1.setPeaking(fs: fs, f0: 230.0, q: 0.707, gainDb: db[1])
+        m2.setPeaking(fs: fs, f0: 910.0, q: 0.707, gainDb: db[2])
+        m3.setPeaking(fs: fs, f0: 3600.0, q: 0.707, gainDb: db[3])
 
         let nyq = fs * 0.5
-        let fHigh = min(14_000.0, nyq * 0.90)
+        let fHigh = min(9000.0, nyq * 0.82)
         high.setHighShelf(fs: fs, f0: fHigh, slope: 1.0, gainDb: db[4])
     }
 

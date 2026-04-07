@@ -51,21 +51,24 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private var lastVoicePath: Bool = false
   private var lastSampleRate: Double = 48_000
 
-  private let A2DP_SAFE_GAIN_CAP: Double = 0.70
-  private let A2DP_TOTAL_GAIN_CAP: Double = 1.25
-  private let FEEDBACK_RMS_THRESHOLD: Double = 0.20
-  private let FEEDBACK_RISE_THRESHOLD: Double = 0.045
+  private var wantsBluetoothA2DPPlayback: Bool = false
+  private var lastNonVoiceA2dpTargetTs: Double = 0.0
+
+  private let A2DP_SAFE_GAIN_CAP: Double = 1.35
+  private let A2DP_TOTAL_GAIN_CAP: Double = 2.40
+  private let FEEDBACK_RMS_THRESHOLD: Double = 0.18
+  private let FEEDBACK_RISE_THRESHOLD: Double = 0.035
   private let GUARD_MIN: Double = 0.05
   private let A2DP_MUTE_MS: Double = 40.0
   private let A2DP_HARD_MUTE_RMS: Double = 0.55
 
   private let SPEAKER_VOICE_SR: Double = 48_000
 
-  // tăng gain base cho speaker (đã có AEC nên an toàn để max)
-  private let FIXED_GAIN_SPEAKER: Double = 0.75
-  private let FIXED_GAIN_WIRED:   Double = 1.35
-  private let FIXED_GAIN_HFP:     Double = 1.20
-  private let SPK_TOTAL_GAIN_CAP: Double = 1.10
+  // Tăng tiếng âm thanh output theo yêu cầu
+  private let FIXED_GAIN_SPEAKER: Double = 1.85
+  private let FIXED_GAIN_WIRED:   Double = 2.80
+  private let FIXED_GAIN_HFP:     Double = 2.50
+  private let SPK_TOTAL_GAIN_CAP: Double = 2.20
 
   private let A2DP_HPF_HZ: Double = 220.0
   private let A2DP_AFS_ANALYZE_MS: Double = 100.0
@@ -77,36 +80,36 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private let A2DP_GATE_ATTACK_MS: Double = 4.0
   private let A2DP_GATE_RELEASE_MS: Double = 260.0
 
-  private let SPK_HPF_HZ: Double = 160.0
-  private let SPK_LPF_HZ: Double = 4000.0
-  private let SPK_GATE_THR: Double = 0.030
+  private let SPK_HPF_HZ: Double = 150.0
+  private let SPK_LPF_HZ: Double = 1750.0
+  private let SPK_GATE_THR: Double = 0.022
   private let SPK_GATE_ATTACK_MS: Double = 2.0
-  private let SPK_GATE_RELEASE_MS: Double = 120.0
+  private let SPK_GATE_RELEASE_MS: Double = 160.0
 
-  private let SPK_AFS_ANALYZE_MS: Double = 55.0
-  private let SPK_DUCK_MS: Double = 700.0
+  private let SPK_AFS_ANALYZE_MS: Double = 32.0
+  private let SPK_DUCK_MS: Double = 900.0
 
-  private let SPK_FEEDBACK_RMS_THRESHOLD: Double = 0.070
-  private let SPK_FEEDBACK_RISE_THRESHOLD: Double = 0.018
-  private let SPK_GUARD_MIN: Double = 0.06
+  private let SPK_FEEDBACK_RMS_THRESHOLD: Double = 0.040
+  private let SPK_FEEDBACK_RISE_THRESHOLD: Double = 0.010
+  private let SPK_GUARD_MIN: Double = 0.05
 
   private let SPK_TALK_RMS: Double = 0.030
-  private let SPK_MONITOR_MIN: Double = 0.72
-  private let SPK_MONITOR_ATTACK: Double = 0.14
+  private let SPK_MONITOR_MIN: Double = 0.62
+  private let SPK_MONITOR_ATTACK: Double = 0.18
   private let SPK_MONITOR_RELEASE: Double = 0.012
 
-  private let SPK_PRE_DUCK_RMS: Double = 0.022
-  private let SPK_HARD_DUCK_RMS: Double = 0.120
+  private let SPK_PRE_DUCK_RMS: Double = 0.020
+  private let SPK_HARD_DUCK_RMS: Double = 0.080
 
   private let A2DP_TALK_RMS_EFFECTIVE: Double = 0.030
   private let A2DP_MONITOR_MIN_EFFECTIVE: Double = 0.60
   private let A2DP_MONITOR_ATTACK: Double = 0.12
   private let A2DP_MONITOR_RELEASE: Double = 0.008
 
-  private let EXPANDER_THRESHOLD: Double = 0.008
-  private let EXPANDER_RATIO: Double = 0.25
-  private let EXPANDER_ATTACK: Double = 0.18
-  private let EXPANDER_RELEASE: Double = 0.025
+  private let EXPANDER_THRESHOLD: Double = 0.010
+  private let EXPANDER_RATIO: Double = 0.30
+  private let EXPANDER_ATTACK: Double = 0.35
+  private let EXPANDER_RELEASE: Double = 0.008
 
   private var eq: Eq5Band?
   private var hpf: OnePoleHpf?
@@ -121,6 +124,9 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
   private var speechTracker: SpeechPresenceTracker?
   private var speakerGuardCtl: SpeakerFeedbackController?
+
+  private var echoReducer: AdaptiveEchoReducer?
+  private var presenceSmoother: PresenceSmoother?
 
   private var a2dpFlag: Bool = false
   private var lastA2dpCheckTs: Double = 0.0
@@ -141,6 +147,10 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private var lastSpeechScore: Double = 0.0
   private var lastZcr: Double = 0.0
 
+  private var lastEchoCancelGain: Double = 0.0
+  private var lastEchoDelayMs: Double = 0.0
+  private var lastPresenceMix: Double = 0.0
+
   private var monoFormat: AVAudioFormat?
 
   private let poolLock = NSLock()
@@ -158,7 +168,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private var lastRouteRestartTs: Double = 0.0
   private var didLogTapBufferFormat: Bool = false
 
-  // warmup chống bóp gain ngay lúc mới start
   private var startWarmupUntilTs: Double = 0.0
   private var isStoppingNow: Bool = false
 
@@ -178,7 +187,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     routeBtMic = r.inputs.contains { $0.portType == .bluetoothHFP }
   }
 
-  private func liveRouteFlags() -> (a2dp: Bool, wired: Bool, btHfp: Bool, outIsSpeaker: Bool) {
+  private func liveRouteFlags() -> (a2dp: Bool, wired: Bool, btHfp: Bool, outIsSpeaker: Bool, outIsReceiver: Bool) {
     let r = session.currentRoute
     let a2dp = r.outputs.contains { $0.portType == .bluetoothA2DP }
     let wiredOut = r.outputs.contains { $0.portType == .headphones || $0.portType == .usbAudio }
@@ -186,7 +195,18 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     let wired = wiredOut || wiredIn
     let btHfp = r.inputs.contains { $0.portType == .bluetoothHFP }
     let outIsSpeaker = r.outputs.contains { $0.portType == .builtInSpeaker }
-    return (a2dp, wired, btHfp, outIsSpeaker)
+    let outIsReceiver = r.outputs.contains { $0.portType == .builtInReceiver }
+    return (a2dp, wired, btHfp, outIsSpeaker, outIsReceiver)
+  }
+
+  private func hasBluetoothA2dpOutputAvailable() -> Bool {
+    session.currentRoute.outputs.contains { $0.portType == .bluetoothA2DP }
+  }
+
+  private func preferredBuiltInMic() -> AVAudioSessionPortDescription? {
+    session.availableInputs?.first {
+      $0.portType == .builtInMic
+    }
   }
 
   private func prepareFreePool(frames: Int, mono: AVAudioFormat) {
@@ -285,7 +305,9 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       result(nil)
 
     case "stop":
-      stopLoopback()
+      audioQueue.async { [weak self] in
+        self?.stopLoopback()
+      }
       result(nil)
 
     case "setParams":
@@ -400,7 +422,9 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         self.log("❌ Microphone permission denied -> cannot start loopback")
         return
       }
-      self._startLoopbackInternal(voiceMode: voiceMode)
+      self.audioQueue.async {
+        self._startLoopbackInternal(voiceMode: voiceMode)
+      }
     }
   }
 
@@ -410,6 +434,11 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     lastVoiceModeRequested = voiceMode
 
     updateRouteCache()
+
+    wantsBluetoothA2DPPlayback = (!voiceMode) && routeA2dp
+    if wantsBluetoothA2DPPlayback {
+      lastNonVoiceA2dpTargetTs = nowMs()
+    }
 
     if voiceMode && !routeBtMic {
       startLoopback(voiceMode: false)
@@ -447,11 +476,13 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     configureAndStart(sampleRate: 48_000, voicePath: false, token: pendingStartToken)
   }
 
-  // stop đồng bộ hơn để lần start sau không bị race
   private func stopLoopback() {
     pendingStartToken += 1
     running = false
     isStoppingNow = true
+
+    wantsBluetoothA2DPPlayback = false
+    lastNonVoiceA2dpTargetTs = 0.0
 
     guardGain = 1.0
     monitorGain = 1.0
@@ -459,14 +490,17 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     preDuckGain = 1.0
     expanderGain = 1.0
     lastRms = 0.0
+    lastGuardLogTs = 0.0
+    lastMeterTs = 0.0
     duckUntilTs = 0.0
     lastAnalyzeTs = 0.0
     lastA2dpCheckTs = 0.0
-    lastMeterTs = 0.0
-    lastGuardLogTs = 0.0
     lastRouteRestartTs = 0.0
     didLogTapBufferFormat = false
     startWarmupUntilTs = 0.0
+    lastEchoCancelGain = 0.0
+    lastEchoDelayMs = 0.0
+    lastPresenceMix = 0.0
 
     hasTimeline = false
     nextPlaySampleTime = 0
@@ -481,6 +515,8 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     afs = nil
     comp = nil
     limiter = nil
+    echoReducer = nil
+    presenceSmoother = nil
     monoFormat = nil
 
     speechTracker = nil
@@ -513,7 +549,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     lastSampleRate = sampleRate
 
     updateRouteCache()
-    a2dpFlag = (!voicePath) && routeA2dp && !routeWired
+    a2dpFlag = (!voicePath) && (routeA2dp || wantsBluetoothA2DPPlayback) && !routeWired
 
     do {
       try configureSession(voicePath: voicePath, sampleRate: sampleRate)
@@ -534,7 +570,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       self.didLogTapBufferFormat = false
 
       let input = self.engine.inputNode
-
       usleep(20_000)
 
       let inputFormat = input.inputFormat(forBus: 0)
@@ -616,28 +651,39 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private func configureSession(voicePath: Bool, sampleRate: Double) throws {
     let beforePerm = session.recordPermission
     log("⚙️[configureSession] BEGIN voicePath=\(voicePath) sampleRate=\(sampleRate) duck=\(duckOthersEnabled) perm=\(permStr(beforePerm))")
-    log("🔥 BUILD_TAG=2026-03-24-SPK-LOUDER-LESS-CUT SPEAKER_VOICE_SR=\(SPEAKER_VOICE_SR) FIXED_GAIN_SPEAKER=\(FIXED_GAIN_SPEAKER)")
+    log("🔥 BUILD_TAG=2026-04-02-SPK-DEFAULT-VOLUME-UP SPEAKER_VOICE_SR=\(SPEAKER_VOICE_SR) FIXED_GAIN_SPEAKER=\(FIXED_GAIN_SPEAKER)")
     log("🔥 FILE=\(#file) LINE=\(#line)")
     logSession("beforeConfigure")
 
     let flags = liveRouteFlags()
     let wiredNow = flags.wired
-    let a2dpNow  = flags.a2dp
+    let a2dpNow  = flags.a2dp || (wantsBluetoothA2DPPlayback && !voicePath)
     let btHfpNow = flags.btHfp
     let outIsSpeaker = flags.outIsSpeaker
 
     let speakerDefaultNow = voicePath && outIsSpeaker && !btHfpNow && !wiredNow && !a2dpNow
 
-    log("⚙️[configureSession] flags wired=\(wiredNow) a2dp=\(a2dpNow) btHfp=\(btHfpNow) outIsSpeaker=\(outIsSpeaker) speakerDefaultNow=\(speakerDefaultNow)")
+    log("⚙️[configureSession] flags wired=\(wiredNow) a2dp=\(a2dpNow) btHfp=\(btHfpNow) outIsSpeaker=\(outIsSpeaker) speakerDefaultNow=\(speakerDefaultNow) wantsBluetoothA2DPPlayback=\(wantsBluetoothA2DPPlayback)")
 
-    var options: AVAudioSession.CategoryOptions = [.allowBluetooth]
-    if !voicePath { options.insert(.allowBluetoothA2DP) }
+    var options: AVAudioSession.CategoryOptions = []
     if duckOthersEnabled { options.insert(.duckOthers) }
-    if speakerDefaultNow { options.insert(.defaultToSpeaker) }
+
+    if voicePath {
+      options.insert(.allowBluetooth)
+    } else if a2dpNow {
+      options.insert(.allowBluetoothA2DP)
+    } else {
+      options.insert(.allowBluetooth)
+      options.insert(.allowBluetoothA2DP)
+    }
+
+    if speakerDefaultNow {
+      options.insert(.defaultToSpeaker)
+    }
 
     let mode: AVAudioSession.Mode
     if speakerDefaultNow {
-      mode = .default // Phải dùng raw mic, để iOS không chém sạch tiếng vì nhầm là echo dội về
+      mode = .default
     } else if voicePath {
       mode = .voiceChat
     } else {
@@ -653,7 +699,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       try session.setPreferredIOBufferDuration(0.010)
     } else if a2dpNow && !voicePath {
       try session.setPreferredSampleRate(44_100)
-      try session.setPreferredIOBufferDuration(0.030)
+      try session.setPreferredIOBufferDuration(0.023)
     } else {
       try session.setPreferredSampleRate(sampleRate)
       try session.setPreferredIOBufferDuration(voicePath ? 0.008 : 0.010)
@@ -663,8 +709,12 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       if let wired = session.availableInputs?.first(where: { $0.portType == .headsetMic || $0.portType == .usbAudio }) {
         try? session.setPreferredInput(wired)
       }
-    }
-    if voicePath {
+    } else if a2dpNow && !voicePath {
+      if let builtIn = preferredBuiltInMic() {
+        try? session.setPreferredInput(builtIn)
+        log("🎙️[configureSession] preferred built-in mic for A2DP path")
+      }
+    } else if voicePath {
       if let hfp = session.availableInputs?.first(where: { $0.portType == .bluetoothHFP }) {
         try? session.setPreferredInput(hfp)
       }
@@ -681,6 +731,14 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     updateRouteCache()
 
+    if a2dpNow && !voicePath {
+      if let builtIn = preferredBuiltInMic() {
+        try? session.setPreferredInput(builtIn)
+      }
+      updateRouteCache()
+      log("🎧[A2DP-FIX] route after A2DP configure = \(routeStr(session.currentRoute))")
+    }
+
     log("⚙️[configureSession] END perm=\(permStr(session.recordPermission)) speakerDefaultNow=\(speakerDefaultNow)")
     logSession("afterConfigure")
   }
@@ -690,8 +748,8 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     hpf = OnePoleHpf(fs: fs, fc: SPK_HPF_HZ)
     a2dpLpf = OnePoleLpf(fs: fs, fc: SPK_LPF_HZ)
-    spkLpf2 = OnePoleLpf(fs: fs, fc: SPK_LPF_HZ)
-    harshDynLpf = OnePoleLpf(fs: fs, fc: 1550.0)
+    spkLpf2 = OnePoleLpf(fs: fs, fc: 1600.0)
+    harshDynLpf = OnePoleLpf(fs: fs, fc: 1180.0)
 
     gate = SimpleGate(sampleRate: fs,
                       threshold: SPK_GATE_THR,
@@ -699,32 +757,43 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
                       releaseMs: SPK_GATE_RELEASE_MS)
 
     expander = DownwardExpander(sampleRate: fs,
-                                threshold: 0.015,
-                                ratio: 4.0,
-                                attackMs: 4.0,
-                                releaseMs: 150.0,
-                                floorGain: 0.10)
+                                threshold: 0.010,
+                                ratio: 2.80,
+                                attackMs: 2.0,
+                                releaseMs: 80.0,
+                                floorGain: 0.03)
 
     afs = AntiFeedbackAfs(fs: fs)
 
     comp = SimpleCompressor(sampleRate: fs,
-                            threshold: 0.075,
-                            ratio: 2.4,
-                            attackMs: 1.8,
-                            releaseMs: 160.0)
+                            threshold: 0.40,
+                            ratio: 2.0,
+                            attackMs: 2.0,
+                            releaseMs: 150.0)
 
     limiter = SimpleLimiter(sampleRate: fs,
-                            threshold: 0.38,
-                            attackMs: 0.12,
-                            releaseMs: 180.0)
+                            threshold: 0.65,
+                            attackMs: 0.08,
+                            releaseMs: 220.0)
 
-    speechTracker = SpeechPresenceTracker(sampleRate: fs)
+    speechTracker = SpeechPresenceTracker(sampleRate: fs,
+                                         rmsOn: 0.055,
+                                         rmsOff: 0.032,
+                                         zcrMin: 0.006,
+                                         zcrMax: 0.22,
+                                         attackMs: 4.0,
+                                         releaseMs: 65.0,
+                                         hangMs: 70.0)
+
     speakerGuardCtl = SpeakerFeedbackController(
-      guardMinSpeech: 0.55,
-      guardMinNonSpeech: 0.20,
-      hotRms: 0.22,
-      riseThr: 0.090
+      guardMinSpeech: 0.58,
+      guardMinNonSpeech: 0.12,
+      hotRms: 0.078,
+      riseThr: 0.018
     )
+
+    echoReducer = AdaptiveEchoReducer(sampleRate: fs)
+    presenceSmoother = PresenceSmoother(sampleRate: fs)
 
     hpf?.resetState()
     a2dpLpf?.resetState()
@@ -737,6 +806,12 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     afs?.reset()
     speechTracker?.reset()
     speakerGuardCtl?.reset()
+    echoReducer?.reset()
+    presenceSmoother?.reset()
+
+    lastEchoCancelGain = 0.0
+    lastEchoDelayMs = 0.0
+    lastPresenceMix = 0.0
 
     applyEqIfChanged(force: true)
   }
@@ -757,7 +832,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     if (now - lastA2dpCheckTs) > 500 {
       lastA2dpCheckTs = now
-      let newFlag = (!voicePath) && routeA2dp && !routeWired
+      let newFlag = (!voicePath) && (routeA2dp || wantsBluetoothA2DPPlayback) && !routeWired
       if newFlag != a2dpFlag {
         a2dpFlag = newFlag
         guardGain = 1.0
@@ -772,8 +847,13 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         afs?.reset()
         speechTracker?.reset()
         speakerGuardCtl?.reset()
+        echoReducer?.reset()
+        presenceSmoother?.reset()
         duckUntilTs = 0.0
         startWarmupUntilTs = now + 450.0
+        lastEchoCancelGain = 0.0
+        lastEchoDelayMs = 0.0
+        lastPresenceMix = 0.0
 
         hasTimeline = false
         nextPlaySampleTime = 0
@@ -802,8 +882,10 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       let speechInfo = st.analyze(buf: ch0, count: n, nowMs: now)
       speechActive = speechInfo.active
 
-      // fallback cho giọng hữu thanh zcr thấp
-      if !speechActive && rawRms > 0.040 && speechInfo.zcr < 0.090 {
+      if speechActive && rawRms < 0.050 {
+        speechActive = false
+      }
+      if !speechActive && rawRms > 0.065 && speechInfo.zcr < 0.080 {
         speechActive = true
       }
 
@@ -818,11 +900,13 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     if isSpeakerDefaultNow {
       let targetExpand: Double
-      if rawRms < EXPANDER_THRESHOLD {
-        let t = max(0.0, rawRms / EXPANDER_THRESHOLD)
-        targetExpand = pow(t, EXPANDER_RATIO)
-      } else {
+      if speechActive {
         targetExpand = 1.0
+      } else if rawRms < EXPANDER_THRESHOLD {
+        let t = max(0.0, rawRms / EXPANDER_THRESHOLD)
+        targetExpand = 0.05 * pow(t, EXPANDER_RATIO)
+      } else {
+        targetExpand = 0.60
       }
       let k = (targetExpand < expanderGain) ? EXPANDER_ATTACK : EXPANDER_RELEASE
       expanderGain += (targetExpand - expanderGain) * k
@@ -838,9 +922,17 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     } else if isSpeakerDefaultNow {
       if let ctl = speakerGuardCtl {
         ctl.update(rawRms: rawRms, rise: rise, speechActive: speechActive, nowMs: now, startupGrace: inStartupGrace)
+
         monitorGain = ctl.monitorGain
         preDuckGain = ctl.preDuckGain
         guardGain = ctl.guardGain
+
+        if speechActive {
+          monitorGain = min(monitorGain, 0.97)
+          preDuckGain = min(preDuckGain, 0.98)
+          guardGain = min(guardGain, 1.00)
+        }
+
         duckUntilTs = max(duckUntilTs, ctl.duckUntilMs)
       } else {
         monitorGain = 1.0
@@ -859,34 +951,34 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       let targetHarshMix: Double
 
       if inStartupGrace {
-        if rawRms > 0.20 {
-          targetHarshMix = 0.30
+        if rawRms > 0.12 {
+          targetHarshMix = 0.36
         } else {
-          targetHarshMix = 0.05
+          targetHarshMix = 0.18
         }
       } else if speechActive {
-        if rawRms > 0.22 {
-          targetHarshMix = 0.25
-        } else if rawRms > 0.12 {
-          targetHarshMix = 0.15
+        if rawRms > 0.14 {
+          targetHarshMix = 0.38
+        } else if rawRms > 0.08 {
+          targetHarshMix = 0.28
         } else {
-          targetHarshMix = 0.02
+          targetHarshMix = 0.14
         }
       } else {
-        if rawRms < 0.020 {
+        if rawRms < 0.012 {
           targetHarshMix = 0.0
-        } else if rawRms > 0.24 {
-          targetHarshMix = 0.85
-        } else if rawRms > 0.12 {
-          targetHarshMix = 0.50
-        } else if rawRms > 0.06 {
-          targetHarshMix = 0.15
+        } else if rawRms > 0.14 {
+          targetHarshMix = 0.44
+        } else if rawRms > 0.08 {
+          targetHarshMix = 0.32
+        } else if rawRms > 0.04 {
+          targetHarshMix = 0.20
         } else {
-          targetHarshMix = 0.05
+          targetHarshMix = 0.10
         }
       }
 
-      let k = (targetHarshMix > harshMix) ? 0.15 : 0.04
+      let k = (targetHarshMix > harshMix) ? 0.18 : 0.06
       harshMix += (targetHarshMix - harshMix) * k
     } else {
       harshMix = 0.0
@@ -896,7 +988,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       lastAnalyzeTs = now
       afs?.analyzeFloat(input: ch0, count: n)
     }
-    if isSpeakerDefaultNow && rawRms > 0.012 && (now - lastAnalyzeTs) >= SPK_AFS_ANALYZE_MS {
+    if isSpeakerDefaultNow && rawRms > 0.008 && (now - lastAnalyzeTs) >= SPK_AFS_ANALYZE_MS {
       lastAnalyzeTs = now
       afs?.analyzeFloat(input: ch0, count: n)
     }
@@ -907,6 +999,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       if isSpeakerDefaultNow { return FIXED_GAIN_SPEAKER }
       if routeBtMic && voicePath { return FIXED_GAIN_HFP }
       if routeWired { return FIXED_GAIN_WIRED }
+      if a2dpFlag { return 1.0 }
       return 1.0
     }()
 
@@ -917,32 +1010,34 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     }()
 
     let gCap = a2dpFlag ? min(baseGain, A2DP_SAFE_GAIN_CAP) : baseGain
-    var combinedGain = (gCap * masterBoost) * guardGain * micBoost * monitorGain * preDuckGain * expanderGain
+
+    let userOutGain: Double = {
+      if isSpeakerDefaultNow {
+        return clamp(outputGain, 1.00, 2.20)
+      }
+      if a2dpFlag {
+        return clamp(outputGain, 0.70, 1.30)
+      }
+      return clamp(outputGain, 0.0, 6.0)
+    }()
+
+    var combinedGain = (gCap * masterBoost * userOutGain) *
+                       guardGain * micBoost * monitorGain * preDuckGain * expanderGain
 
     if isSpeakerDefaultNow {
-      if !speechActive && !inStartupGrace && rawRms > 0.22 {
-        combinedGain = min(combinedGain, 0.40)
-      }
-
-      combinedGain = min(combinedGain, SPK_TOTAL_GAIN_CAP)
-
-      let floor: Double
-      if inStartupGrace {
-        floor = 0.20
-      } else if speechActive {
-        floor = 0.25
+      if speechActive {
+        combinedGain = min(combinedGain, 0.42)
+        combinedGain = max(combinedGain, 0.14)
       } else {
-        floor = 0.12
+        combinedGain = min(combinedGain, 0.075)
       }
-
-      combinedGain = max(combinedGain, floor)
     }
 
     if a2dpFlag { combinedGain = min(combinedGain, A2DP_TOTAL_GAIN_CAP) }
 
     if now - lastGuardLogTs > 1000 {
       lastGuardLogTs = now
-      log("🎛️[GAIN] speakerDefault=\(isSpeakerDefaultNow) speech=\(speechActive) speechScore=\(String(format: "%.2f", lastSpeechScore)) zcr=\(String(format: "%.3f", lastZcr)) startupGrace=\(inStartupGrace) rawRms=\(String(format: "%.3f", rawRms)) rise=\(String(format: "%.3f", rise)) base=\(String(format: "%.2f", baseGain)) guard=\(String(format: "%.3f", guardGain)) monitor=\(String(format: "%.3f", monitorGain)) preDuck=\(String(format: "%.3f", preDuckGain)) expander=\(String(format: "%.3f", expanderGain)) harshMix=\(String(format: "%.2f", harshMix)) combined=\(String(format: "%.4f", combinedGain))")
+      log("🎛️[GAIN] speakerDefault=\(isSpeakerDefaultNow) a2dp=\(a2dpFlag) speech=\(speechActive) speechScore=\(String(format: "%.2f", lastSpeechScore)) zcr=\(String(format: "%.3f", lastZcr)) startupGrace=\(inStartupGrace) rawRms=\(String(format: "%.3f", rawRms)) rise=\(String(format: "%.3f", rise)) base=\(String(format: "%.2f", baseGain)) guard=\(String(format: "%.3f", guardGain)) monitor=\(String(format: "%.3f", monitorGain)) preDuck=\(String(format: "%.3f", preDuckGain)) expander=\(String(format: "%.3f", expanderGain)) harshMix=\(String(format: "%.2f", harshMix)) echoCancel=\(String(format: "%.2f", lastEchoCancelGain)) echoDelayMs=\(String(format: "%.1f", lastEchoDelayMs)) presence=\(String(format: "%.2f", lastPresenceMix)) combined=\(String(format: "%.4f", combinedGain)) route=\(routeStr(session.currentRoute))")
     }
 
     guard let mono = monoFormat else { return }
@@ -967,6 +1062,12 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       for i in 0..<n {
         var x = Double(ch0[i])
 
+        if isSpeakerDefaultNow, let er = echoReducer {
+          x = er.processMic(x, speechActive: speechActive, startupGrace: inStartupGrace)
+          lastEchoCancelGain = er.currentCancelGain()
+          lastEchoDelayMs = er.currentDelayMs()
+        }
+
         x = eq?.process(x) ?? x
         if !x.isFinite { x = 0 }
 
@@ -983,6 +1084,11 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
             } else {
               _ = harshDynLpf?.process(x)
             }
+
+            if let ps = presenceSmoother {
+              x = ps.process(x, speechActive: speechActive)
+              lastPresenceMix = ps.currentMix()
+            }
           }
 
           if isSpeakerDefaultNow {
@@ -994,7 +1100,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
           x = afs?.process(x) ?? x
         }
 
-        if duckNow { x *= 0.35 }
+        if duckNow { x *= isSpeakerDefaultNow ? 0.68 : 0.82 }
 
         x *= combinedGain
 
@@ -1005,17 +1111,27 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         x = limiter?.process(x) ?? x
         x = softClip(x)
 
-        if isSpeakerDefaultNow && rawRms < 0.006 && abs(x) < 0.010 {
+        if isSpeakerDefaultNow && rawRms < 0.014 && abs(x) < 0.022 {
           x = 0.0
         }
 
         let y = x.clamp(-1.0, 1.0)
         outData[i] = Float(y)
         sumSq += y * y
+
+        if isSpeakerDefaultNow, let er = echoReducer {
+          er.pushSpeakerSample(Float(y))
+        }
       }
     } else {
       for i in 0..<n {
         var x = Double(ch0[i])
+
+        if isSpeakerDefaultNow, let er = echoReducer {
+          x = er.processMic(x, speechActive: speechActive, startupGrace: inStartupGrace)
+          lastEchoCancelGain = er.currentCancelGain()
+          lastEchoDelayMs = er.currentDelayMs()
+        }
 
         if a2dpFlag || isSpeakerDefaultNow {
           x = hpf?.process(x) ?? x
@@ -1030,6 +1146,11 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
             } else {
               _ = harshDynLpf?.process(x)
             }
+
+            if let ps = presenceSmoother {
+              x = ps.process(x, speechActive: speechActive)
+              lastPresenceMix = ps.currentMix()
+            }
           }
 
           if isSpeakerDefaultNow {
@@ -1041,7 +1162,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
           x = afs?.process(x) ?? x
         }
 
-        if duckNow { x *= 0.35 }
+        if duckNow { x *= isSpeakerDefaultNow ? 0.68 : 0.82 }
 
         x *= combinedGain
 
@@ -1052,13 +1173,17 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         x = limiter?.process(x) ?? x
         x = softClip(x)
 
-        if isSpeakerDefaultNow && rawRms < 0.006 && abs(x) < 0.010 {
+        if isSpeakerDefaultNow && rawRms < 0.014 && abs(x) < 0.022 {
           x = 0.0
         }
 
         let y = x.clamp(-1.0, 1.0)
         outData[i] = Float(y)
         sumSq += y * y
+
+        if isSpeakerDefaultNow, let er = echoReducer {
+          er.pushSpeakerSample(Float(y))
+        }
       }
     }
 
@@ -1088,11 +1213,11 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     }
 
     if isSpeakerDefaultNow {
-      let speakerRise = rise > 0.070
-      let speakerHot  = rawRms > 0.20
+      let speakerRise = rise > 0.028
+      let speakerHot  = rawRms > 0.085
 
       if !speechActive && !inStartupGrace && (speakerHot || speakerRise) {
-        duckUntilTs = now + 320.0
+        duckUntilTs = now + 480.0
       }
 
       if let ctl = speakerGuardCtl {
@@ -1102,8 +1227,8 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         }
       }
 
-      if rawRms > SPK_PRE_DUCK_RMS && !speechActive && !inStartupGrace {
-        duckUntilTs = max(duckUntilTs, now + min(220.0, SPK_DUCK_MS))
+      if rawRms > SPK_PRE_DUCK_RMS && !inStartupGrace {
+        duckUntilTs = max(duckUntilTs, now + min(speechActive ? 180.0 : 320.0, SPK_DUCK_MS))
       }
 
       if guardGain < SPK_GUARD_MIN {
@@ -1180,16 +1305,28 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     }
 
     if lastVoicePath {
-      bb[2] = min(bb[2], 0.84)
-      bb[3] = min(bb[3], 0.56)
-      bb[4] = min(bb[4], 0.40)
+      bb[1] = min(bb[1], 0.92)
+      bb[2] = min(bb[2], 0.58)
+      bb[3] = min(bb[3], 0.32)
+      bb[4] = min(bb[4], 0.16)
     }
 
     lastBands = bb
 
+    // Chống vọng khi người dùng cố tình đẩy tất cả các thanh EQ lên max
+    // Tự động triệt tiêu lượng gain tổng dư thừa (Auto Makeup Reduction)
+    var sumLinear = 0.0
+    for i in 0..<5 { sumLinear += bb[i] }
+    let avgLinear = sumLinear / 5.0
+
+    var makeup = 1.0
+    if avgLinear > 1.25 {
+        makeup = 1.25 / avgLinear
+    }
+
     var db = [Double](repeating: 0, count: 5)
     for i in 0..<5 {
-      let gi = max(0.0001, bb[i])
+      let gi = max(0.0001, bb[i] * makeup)
       db[i] = 20.0 * log10(gi)
     }
 
@@ -1225,18 +1362,42 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         targetVoicePath = true
       }
     } else {
-      if routeA2dp {
-        targetSampleRate = 44_100
-        targetVoicePath = false
-      } else if routeBtMic {
-        targetSampleRate = 16_000
-        targetVoicePath = true
-      } else if !routeWired {
-        targetSampleRate = SPEAKER_VOICE_SR
-        targetVoicePath = true
+      if wantsBluetoothA2DPPlayback {
+        if routeA2dp {
+          targetSampleRate = 44_100
+          targetVoicePath = false
+          lastNonVoiceA2dpTargetTs = now
+        } else if routeBtMic && (now - lastNonVoiceA2dpTargetTs) < 1800.0 {
+          log("🛡️[RouteChange] ignore transient HFP, keep trying A2DP playback path")
+          targetSampleRate = 44_100
+          targetVoicePath = false
+        } else if !routeWired && !routeBtMic {
+          targetSampleRate = 44_100
+          targetVoicePath = false
+        } else if routeBtMic {
+          targetSampleRate = 16_000
+          targetVoicePath = true
+        } else if !routeWired {
+          targetSampleRate = SPEAKER_VOICE_SR
+          targetVoicePath = true
+        } else {
+          targetSampleRate = 48_000
+          targetVoicePath = false
+        }
       } else {
-        targetSampleRate = 48_000
-        targetVoicePath = false
+        if routeA2dp {
+          targetSampleRate = 44_100
+          targetVoicePath = false
+        } else if routeBtMic {
+          targetSampleRate = 16_000
+          targetVoicePath = true
+        } else if !routeWired {
+          targetSampleRate = SPEAKER_VOICE_SR
+          targetVoicePath = true
+        } else {
+          targetSampleRate = 48_000
+          targetVoicePath = false
+        }
       }
     }
 
@@ -1290,10 +1451,15 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     if type == .began {
       log("⛔️[Interruption] began -> stop")
-      stopLoopback()
+      audioQueue.async { [weak self] in
+        self?.stopLoopback()
+      }
     } else {
       log("▶️[Interruption] ended -> restart")
-      startLoopback(voiceMode: lastVoiceModeRequested)
+      let voiceMode = lastVoiceModeRequested
+      DispatchQueue.main.async { [weak self] in
+        self?.startLoopback(voiceMode: voiceMode)
+      }
     }
   }
 

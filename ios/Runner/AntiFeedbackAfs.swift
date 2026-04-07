@@ -1,28 +1,30 @@
 import Foundation
 
-// MARK: - AntiFeedbackAfs (speaker-default tuned)
+// MARK: - AntiFeedbackAfs
+// Bản này ưu tiên built-in speaker: bắt các đỉnh ring phổ biến,
+// nhưng threshold đã nới để bớt ăn nhầm giọng nói.
 final class AntiFeedbackAfs {
 
     private let fs: Double
 
-    // Ưu tiên dải built-in speaker dễ ring / chói nhất
+    // Các vùng hay ring/chói trên speaker phone
     private let candidates: [Double] = [
         800.0, 1000.0, 1250.0, 1600.0, 2000.0, 2500.0, 3150.0, 4000.0, 5000.0
     ]
 
-    private let notchCount = 2
+    private let notchCount = 3
     private var notch: [Biquad]
     private var notchF: [Double]
     private var notchUntilMs: [Int64]
 
-    // notch hẹp hơn để bớt ăn nhầm giọng
-    private let Q: Double = 8.0
+    // notch hẹp hơn để bớt làm mỏng giọng
+    private let Q: Double = 10.0
 
     private var ema: [Double]
-    private let emaAlpha: Double = 0.92
+    private let emaAlpha: Double = 0.88
 
-    // giữ notch ngắn hơn để bớt làm mỏng tiếng
-    private let holdMs: Int64 = 700
+    // giữ notch ngắn hơn để đỡ “kẹt” giọng
+    private let holdMs: Int64 = 900
 
     init(fs: Double) {
         self.fs = fs
@@ -80,10 +82,11 @@ final class AntiFeedbackAfs {
         let f0 = candidates[bestK]
         let bestEnergy = e[bestK]
 
-        // bớt nhạy để không bắt nhầm giọng nói
-        if bestScore < 8.5 { return }
-        if bestEnergy < 8e-6 { return }
+        // speaker default cần trigger sớm hơn để chặn ring / chói
+        if bestScore < 4.8 { return }
+        if bestEnergy < 3e-6 { return }
 
+        // nếu notch hiện tại gần tần số đó thì chỉ refresh
         for i in 0..<notchCount {
             if notchF[i] > 0.0,
                abs(notchF[i] - f0) < 180.0,
@@ -93,6 +96,7 @@ final class AntiFeedbackAfs {
             }
         }
 
+        // tìm slot rảnh
         var slot = -1
         for i in 0..<notchCount {
             if now >= notchUntilMs[i] {
@@ -101,6 +105,7 @@ final class AntiFeedbackAfs {
             }
         }
 
+        // nếu hết slot thì thay slot có expiry sớm nhất
         if slot < 0 {
             var minUntil = notchUntilMs[0]
             slot = 0
@@ -117,6 +122,7 @@ final class AntiFeedbackAfs {
         notchUntilMs[slot] = now + holdMs
     }
 
+    @inline(__always)
     func process(_ xIn: Double) -> Double {
         var x = xIn
         let now = Self.nowMs()

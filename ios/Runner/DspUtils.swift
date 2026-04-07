@@ -1,17 +1,5 @@
 import Foundation
 
-@inline(__always)
-func softClipCubic(_ xIn: Double) -> Double {
-    if !xIn.isFinite { return 0.0 }
-
-    var x = xIn
-    if x > 2.5 { x = 2.5 }
-    if x < -2.5 { x = -2.5 }
-
-    let y = x - (x * x * x) / 3.0
-    return min(1.0, max(-1.0, y))
-}
-
 final class OnePoleHpf {
     private var a: Double = 0.0
     private var x1: Double = 0.0
@@ -40,6 +28,7 @@ final class OnePoleHpf {
     }
 }
 
+// MARK: - OnePoleLPF
 final class OnePoleLpf {
     private var a: Double = 0.0
     private var y1: Double = 0.0
@@ -64,6 +53,7 @@ final class OnePoleLpf {
     }
 }
 
+// MARK: - SimpleGate
 final class SimpleGate {
     private let thr: Double
     private let atk: Double
@@ -105,6 +95,7 @@ final class SimpleGate {
     }
 }
 
+// MARK: - DownwardExpander
 final class DownwardExpander {
     private let thr: Double
     private let ratio: Double
@@ -157,6 +148,7 @@ final class DownwardExpander {
     }
 }
 
+// MARK: - SimpleCompressor
 final class SimpleCompressor {
     private let thr: Double
     private let rat: Double
@@ -192,6 +184,7 @@ final class SimpleCompressor {
     func reset() { env = 0.0 }
 }
 
+// MARK: - SimpleLimiter
 final class SimpleLimiter {
     private let sr: Double
     private let thr: Double
@@ -225,7 +218,7 @@ final class SimpleLimiter {
     }
 }
 
-// Nới detector để bắt speech sớm hơn, nhất là voice có ZCR thấp
+// MARK: - SpeechPresenceTracker
 final class SpeechPresenceTracker {
     private let attack: Double
     private let release: Double
@@ -285,7 +278,7 @@ final class SpeechPresenceTracker {
 
         let strongSpeech = (rms >= rmsOn && zcr >= zcrMin && zcr <= zcrMax)
         let weakSpeech = (rms >= rmsOff && zcr >= zcrMin * 0.6 && zcr <= zcrMax * 1.25)
-        let voicedLike = (rms >= 0.030 && zcr <= 0.08)
+        let voicedLike = (rms >= 0.060 && zcr <= 0.08)
 
         let target: Double
         if strongSpeech {
@@ -310,7 +303,7 @@ final class SpeechPresenceTracker {
     }
 }
 
-// Nới guard để tiếng to hơn, bớt cắt âm
+// MARK: - SpeakerFeedbackController
 final class SpeakerFeedbackController {
     private(set) var guardGain: Double = 1.0
     private(set) var preDuckGain: Double = 1.0
@@ -322,10 +315,10 @@ final class SpeakerFeedbackController {
     private let hotRms: Double
     private let riseThr: Double
 
-    init(guardMinSpeech: Double = 0.55,
-         guardMinNonSpeech: Double = 0.42,
-         hotRms: Double = 0.22,
-         riseThr: Double = 0.090) {
+    init(guardMinSpeech: Double = 0.42,
+         guardMinNonSpeech: Double = 0.28,
+         hotRms: Double = 0.11,
+         riseThr: Double = 0.020) {
         self.guardMinSpeech = guardMinSpeech
         self.guardMinNonSpeech = guardMinNonSpeech
         self.hotRms = hotRms
@@ -342,50 +335,56 @@ final class SpeakerFeedbackController {
     func update(rawRms: Double, rise: Double, speechActive: Bool, nowMs: Double, startupGrace: Bool) {
         let hot = rawRms > hotRms
         let rising = rise > riseThr
+        let veryHot = rawRms > (hotRms * 1.55)
 
         if startupGrace {
-            let targetMonitor = rawRms > 0.05 ? 0.92 : 1.0
-            let targetPreDuck = rawRms > 0.16 ? 0.94 : 1.0
+            let targetMonitor = rawRms > 0.030 ? 0.78 : 0.92
+            let targetPreDuck = rawRms > 0.060 ? 0.84 : 0.94
 
-            monitorGain += (targetMonitor - monitorGain) * 0.08
-            preDuckGain += (targetPreDuck - preDuckGain) * 0.08
-            guardGain += (1.0 - guardGain) * 0.05
-
-            if guardGain < 0.80 { guardGain = 0.80 }
+            monitorGain += (targetMonitor - monitorGain) * 0.18
+            preDuckGain += (targetPreDuck - preDuckGain) * 0.18
+            guardGain += (0.72 - guardGain) * 0.10
+            guardGain = min(guardGain, 0.80)
             return
         }
 
         if speechActive {
-            let targetMonitor = rawRms > 0.04 ? 0.90 : 1.0
-            let targetPreDuck = rawRms > 0.16 ? 0.93 : 1.0
+            let targetMonitor = rawRms > 0.028 ? 0.76 : 0.90
+            let targetPreDuck = rawRms > 0.060 ? 0.86 : 0.94
 
-            monitorGain += (targetMonitor - monitorGain) * (targetMonitor < monitorGain ? 0.08 : 0.03)
-            preDuckGain += (targetPreDuck - preDuckGain) * (targetPreDuck < preDuckGain ? 0.09 : 0.03)
+            monitorGain += (targetMonitor - monitorGain) * (targetMonitor < monitorGain ? 0.18 : 0.05)
+            preDuckGain += (targetPreDuck - preDuckGain) * (targetPreDuck < preDuckGain ? 0.20 : 0.05)
 
-            if hot && rising {
-                duckUntilMs = nowMs + 100.0
-                guardGain *= 0.97
+            if veryHot && rising {
+                duckUntilMs = nowMs + 320.0
+                guardGain *= 0.74
+            } else if hot && rising {
+                duckUntilMs = nowMs + 240.0
+                guardGain *= 0.82
             } else if hot {
-                guardGain *= 0.985
+                guardGain *= 0.90
             } else {
-                guardGain += (1.0 - guardGain) * 0.030
+                guardGain += (0.94 - guardGain) * 0.032
             }
 
             if guardGain < guardMinSpeech { guardGain = guardMinSpeech }
         } else {
-            let targetMonitor = rawRms > 0.03 ? 0.84 : 1.0
-            let targetPreDuck = rawRms > 0.12 ? 0.88 : 1.0
+            let targetMonitor = rawRms > 0.020 ? 0.62 : 0.86
+            let targetPreDuck = rawRms > 0.045 ? 0.72 : 0.90
 
-            monitorGain += (targetMonitor - monitorGain) * (targetMonitor < monitorGain ? 0.10 : 0.03)
-            preDuckGain += (targetPreDuck - preDuckGain) * (targetPreDuck < preDuckGain ? 0.10 : 0.03)
+            monitorGain += (targetMonitor - monitorGain) * (targetMonitor < monitorGain ? 0.18 : 0.05)
+            preDuckGain += (targetPreDuck - preDuckGain) * (targetPreDuck < preDuckGain ? 0.22 : 0.05)
 
-            if hot && rising {
-                duckUntilMs = nowMs + 240.0
-                guardGain *= 0.90
+            if veryHot && rising {
+                duckUntilMs = nowMs + 480.0
+                guardGain *= 0.65
+            } else if hot && rising {
+                duckUntilMs = nowMs + 380.0
+                guardGain *= 0.75
             } else if hot {
-                guardGain *= 0.95
+                guardGain *= 0.85
             } else {
-                guardGain += (1.0 - guardGain) * 0.018
+                guardGain += (0.90 - guardGain) * 0.022
             }
 
             if guardGain < guardMinNonSpeech { guardGain = guardMinNonSpeech }
@@ -394,9 +393,238 @@ final class SpeakerFeedbackController {
 
     func shouldHardMute(rawRms: Double, rise: Double, speechActive: Bool, startupGrace: Bool) -> Bool {
         if startupGrace { return false }
-        if speechActive { return false }
-        return rawRms > 0.50 || rise > 0.18
+        return (!speechActive && (rawRms > 0.24 || rise > 0.07)) || rawRms > 0.34
+    }
+}
+
+// MARK: - CircularFloatDelayBuffer
+final class CircularFloatDelayBuffer {
+    private var buf: [Float]
+    private var writeIndex: Int = 0
+    private(set) var capacity: Int
+
+    init(capacity: Int) {
+        self.capacity = max(2048, capacity)
+        self.buf = Array(repeating: 0, count: self.capacity)
     }
 
-    
+    func reset() {
+        for i in 0..<buf.count { buf[i] = 0 }
+        writeIndex = 0
+    }
+
+    func write(_ x: Float) {
+        buf[writeIndex] = x
+        writeIndex += 1
+        if writeIndex >= capacity { writeIndex = 0 }
+    }
+
+    @inline(__always)
+    func read(delaySamples: Int) -> Float {
+        let d = max(0, min(delaySamples, capacity - 1))
+        var idx = writeIndex - 1 - d
+        if idx < 0 { idx += capacity }
+        return buf[idx]
+    }
+}
+
+// MARK: - AdaptiveEchoReducer
+final class AdaptiveEchoReducer {
+    private let sampleRate: Double
+    private let ref: CircularFloatDelayBuffer
+
+    private let candidateDelays: [Int]
+    private var corrEma: [Double]
+    private var refEma: [Double]
+    private var micEma: Double = 1e-6
+
+    private var gainFast: Double = 0.0
+    private var gainSlow: Double = 0.0
+    private var chosenDelay: Int = 0
+    private var holdSamples: Int = 0
+    private var sampleCounter: Int = 0
+
+    init(sampleRate: Double) {
+        self.sampleRate = sampleRate
+
+        let cap = Int(sampleRate * 0.20)
+        self.ref = CircularFloatDelayBuffer(capacity: cap)
+
+        let msCandidates: [Double] = [10, 14, 18, 22, 28, 34, 42, 52, 64, 80, 100, 128]
+        self.candidateDelays = msCandidates.map { Int(sampleRate * ($0 / 1000.0)) }
+        self.corrEma = Array(repeating: 1e-6, count: msCandidates.count)
+        self.refEma = Array(repeating: 1e-6, count: msCandidates.count)
+        self.chosenDelay = self.candidateDelays.first ?? 0
+    }
+
+    func reset() {
+        ref.reset()
+        for i in 0..<corrEma.count {
+          corrEma[i] = 1e-6
+          refEma[i] = 1e-6
+        }
+        micEma = 1e-6
+        gainFast = 0.0
+        gainSlow = 0.0
+        chosenDelay = candidateDelays.first ?? 0
+        holdSamples = 0
+        sampleCounter = 0
+    }
+
+    func pushSpeakerSample(_ x: Float) {
+        ref.write(x)
+    }
+
+    @inline(__always)
+    func processMic(_ xIn: Double, speechActive: Bool, startupGrace: Bool) -> Double {
+        var x = xIn
+        let absMic = abs(x)
+        micEma = 0.992 * micEma + 0.008 * max(absMic, 1e-6)
+
+        if absMic > 0.003 {
+            for i in 0..<candidateDelays.count {
+                let r = Double(ref.read(delaySamples: candidateDelays[i]))
+                let absRef = abs(r)
+                corrEma[i] = 0.988 * corrEma[i] + 0.012 * abs(x * r)
+                refEma[i] = 0.992 * refEma[i] + 0.008 * max(absRef, 1e-6)
+            }
+        }
+
+        sampleCounter += 1
+        if holdSamples > 0 { holdSamples -= 1 }
+
+        if sampleCounter >= 64 {
+            sampleCounter = 0
+
+            var bestIdx = 0
+            var bestScore = -1.0
+            for i in 0..<candidateDelays.count {
+                let score = corrEma[i] / sqrt((refEma[i] * micEma) + 1e-9)
+                if score > bestScore {
+                    bestScore = score
+                    bestIdx = i
+                }
+            }
+
+            if bestScore > 0.14 || holdSamples <= 0 {
+                chosenDelay = candidateDelays[bestIdx]
+                holdSamples = Int(sampleRate * 0.012)
+            }
+        }
+
+        let r = Double(ref.read(delaySamples: chosenDelay))
+        let absRef = abs(r)
+
+        let corr = abs(x * r) / sqrt((absRef * absMic) + 1e-9)
+
+        let target: Double
+        if startupGrace {
+            target = min(0.55, absRef * 0.75)
+        } else if speechActive {
+            target = min(0.65, absRef * 0.70 + corr * 0.20)
+        } else {
+            target = min(0.85, absRef * 0.90 + corr * 0.25)
+        }
+
+        let up = target > gainFast ? 0.18 : 0.02
+        gainFast += (target - gainFast) * up
+        gainSlow += (gainFast - gainSlow) * 0.06
+
+        let cancelGain = speechActive ? min(gainSlow, 0.60) : min(gainSlow, 0.85)
+
+        x = x - cancelGain * r
+
+        if !speechActive && absRef > 0.025 {
+            let residual = abs(x)
+            if residual < absRef * 0.85 {
+                x *= 0.45
+            }
+        }
+
+        return x
+    }
+
+    func currentCancelGain() -> Double { gainSlow }
+    func currentDelayMs() -> Double { Double(chosenDelay) * 1000.0 / sampleRate }
+}
+
+// MARK: - PresenceSmoother
+final class PresenceSmoother {
+    private let cut1 = Biquad()
+    private let cut2 = Biquad()
+    private let cut3 = Biquad()
+
+    private var envFast: Double = 0.0
+    private var envSlow: Double = 0.0
+    private var mix: Double = 0.0
+
+    private let atkFast: Double
+    private let relFast: Double
+    private let atkSlow: Double
+    private let relSlow: Double
+
+    init(sampleRate fs: Double) {
+        cut1.setPeaking(fs: fs, f0: 2100.0, q: 1.1, gainDb: -3.2)
+        cut2.setPeaking(fs: fs, f0: 3100.0, q: 1.3, gainDb: -6.8)
+        cut3.setPeaking(fs: fs, f0: 4300.0, q: 1.1, gainDb: -4.4)
+
+        atkFast = exp(-1.0 / max(1.0, fs * 0.002))
+        relFast = exp(-1.0 / max(1.0, fs * 0.030))
+        atkSlow = exp(-1.0 / max(1.0, fs * 0.010))
+        relSlow = exp(-1.0 / max(1.0, fs * 0.160))
+    }
+
+    func reset() {
+        envFast = 0.0
+        envSlow = 0.0
+        mix = 0.0
+        cut1.resetState()
+        cut2.resetState()
+        cut3.resetState()
+    }
+
+    @inline(__always)
+    func process(_ x: Double, speechActive: Bool) -> Double {
+        let ax = abs(x)
+
+        envFast = (ax > envFast)
+            ? (atkFast * envFast + (1.0 - atkFast) * ax)
+            : (relFast * envFast + (1.0 - relFast) * ax)
+
+        envSlow = (ax > envSlow)
+            ? (atkSlow * envSlow + (1.0 - atkSlow) * ax)
+            : (relSlow * envSlow + (1.0 - relSlow) * ax)
+
+        let delta = max(0.0, envFast - envSlow)
+
+        let target: Double
+        if speechActive {
+            if delta > 0.050 {
+                target = 0.66
+            } else if delta > 0.028 {
+                target = 0.44
+            } else {
+                target = 0.14
+            }
+        } else {
+            if delta > 0.040 {
+                target = 0.58
+            } else if delta > 0.020 {
+                target = 0.32
+            } else {
+                target = 0.08
+            }
+        }
+
+        mix += (target - mix) * (target > mix ? 0.16 : 0.05)
+
+        var y = x
+        y = cut1.process(y)
+        y = cut2.process(y)
+        y = cut3.process(y)
+
+        return x * (1.0 - mix) + y * mix
+    }
+
+    func currentMix() -> Double { mix }
 }
