@@ -164,6 +164,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private var routeA2dp: Bool = false
   private var routeWired: Bool = false
   private var routeBtMic: Bool = false
+  private var isReconfiguring: Bool = false
 
   private var lastRouteRestartTs: Double = 0.0
   private var didLogTapBufferFormat: Bool = false
@@ -201,6 +202,27 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
   private func hasBluetoothA2dpOutputAvailable() -> Bool {
     session.currentRoute.outputs.contains { $0.portType == .bluetoothA2DP }
+  }
+
+  private func hasAnyBluetoothOutputNow() -> Bool {
+    let outs = session.currentRoute.outputs
+    return outs.contains {
+      $0.portType == .bluetoothA2DP || $0.portType == .bluetoothHFP
+    }
+  }
+
+  private func shouldPreferBluetoothA2DPOnRouteChange(reason: AVAudioSession.RouteChangeReason?) -> Bool {
+    guard !lastVoiceModeRequested else { return false }
+
+    let live = liveRouteFlags()
+
+    if live.a2dp { return true }
+
+    if reason == .newDeviceAvailable, hasAnyBluetoothOutputNow() {
+      return true
+    }
+
+    return wantsBluetoothA2DPPlayback
   }
 
   private func preferredBuiltInMic() -> AVAudioSessionPortDescription? {
@@ -435,7 +457,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     updateRouteCache()
 
-    wantsBluetoothA2DPPlayback = (!voiceMode) && routeA2dp
+    wantsBluetoothA2DPPlayback = !voiceMode && (routeA2dp || hasAnyBluetoothOutputNow())
     if wantsBluetoothA2DPPlayback {
       lastNonVoiceA2dpTargetTs = nowMs()
     }
@@ -651,46 +673,57 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private func configureSession(voicePath: Bool, sampleRate: Double) throws {
     let beforePerm = session.recordPermission
     log("⚙️[configureSession] BEGIN voicePath=\(voicePath) sampleRate=\(sampleRate) duck=\(duckOthersEnabled) perm=\(permStr(beforePerm))")
-    log("🔥 BUILD_TAG=2026-04-02-SPK-DEFAULT-VOLUME-UP SPEAKER_VOICE_SR=\(SPEAKER_VOICE_SR) FIXED_GAIN_SPEAKER=\(FIXED_GAIN_SPEAKER)")
-    log("🔥 FILE=\(#file) LINE=\(#line)")
+    log("🔥 BUILD_TAG=2026-04-23-BT-ROUTE-FIX SPEAKER_VOICE_SR=\(SPEAKER_VOICE_SR)")
     logSession("beforeConfigure")
 
+    // 1. Phân tích phần cứng qua availableInputs (không bị lỗi state do inactive)
+    let ins = session.availableInputs ?? []
+    let wiredAvailable = ins.contains { $0.portType == .headsetMic || $0.portType == .usbAudio }
+
+    // Chỉ dùng availableInputs để biết có device tồn tại,
+    // KHÔNG dùng nó làm quyết định cuối cho mode.
+    let btHfpAvailable = ins.contains { $0.portType == .bluetoothHFP }
+    let a2dpExpected = wantsBluetoothA2DPPlayback && !voicePath
+
+    // 2. Setup Options - luôn mặc định có defaultToSpeaker để phòng hờ rớt về Receiver
+    var options: AVAudioSession.CategoryOptions = [.defaultToSpeaker]
+    if duckOthersEnabled { options.insert(.duckOthers) }
+
+    if voicePath {
+      options.insert(.allowBluetooth)
+    } else if a2dpExpected {
+      options.insert(.allowBluetoothA2DP)
+    } else {
+      options.insert(.allowBluetooth)
+      options.insert(.allowBluetoothA2DP)
+    }
+
+    // 3. Chọn đúng Mode ngay từ đầu để tránh lỗi !int khi kích hoạt
+    let liveBefore = liveRouteFlags()
+
+    let mode: AVAudioSession.Mode
+    if voicePath && (liveBefore.btHfp || btHfpAvailable) && !a2dpExpected {
+      mode = .voiceChat
+    } else {
+      mode = .default // Cho Speaker và A2DP
+    }
+
+    log("⚙️[configureSession] PRE-SET mode=\(mode.rawValue) options=\(options) wired=\(wiredAvailable) hfp=\(btHfpAvailable)")
+
+    // 4. Áp dụng Category và Active
+    try session.setCategory(.playAndRecord, mode: mode, options: options)
+    try session.setActive(true)
+
+    // 5. Lúc này session đã hoạt động 100%, đọc lại Route để ra quyết định DSP và Override
     let flags = liveRouteFlags()
     let wiredNow = flags.wired
-    let a2dpNow  = flags.a2dp || (wantsBluetoothA2DPPlayback && !voicePath)
+    let a2dpNow  = flags.a2dp || a2dpExpected
     let btHfpNow = flags.btHfp
     let outIsSpeaker = flags.outIsSpeaker
 
     let speakerDefaultNow = voicePath && outIsSpeaker && !btHfpNow && !wiredNow && !a2dpNow
 
-    log("⚙️[configureSession] flags wired=\(wiredNow) a2dp=\(a2dpNow) btHfp=\(btHfpNow) outIsSpeaker=\(outIsSpeaker) speakerDefaultNow=\(speakerDefaultNow) wantsBluetoothA2DPPlayback=\(wantsBluetoothA2DPPlayback)")
-
-    var options: AVAudioSession.CategoryOptions = []
-    if duckOthersEnabled { options.insert(.duckOthers) }
-
-    if voicePath {
-      options.insert(.allowBluetooth)
-    } else if a2dpNow {
-      options.insert(.allowBluetoothA2DP)
-    } else {
-      options.insert(.allowBluetooth)
-      options.insert(.allowBluetoothA2DP)
-    }
-
-    if speakerDefaultNow {
-      options.insert(.defaultToSpeaker)
-    }
-
-    let mode: AVAudioSession.Mode
-    if speakerDefaultNow {
-      mode = .default
-    } else if voicePath {
-      mode = .voiceChat
-    } else {
-      mode = a2dpNow ? .default : .measurement
-    }
-
-    log("⚙️[configureSession] choose mode=\(mode.rawValue) options=\(options)")
+    log("⚙️[configureSession] FINAL flags wired=\(wiredNow) a2dp=\(a2dpNow) btHfp=\(btHfpNow) outIsSpeaker=\(outIsSpeaker) speakerDefaultNow=\(speakerDefaultNow) wantsBluetoothA2DPPlayback=\(wantsBluetoothA2DPPlayback)")
 
     try session.setCategory(.playAndRecord, mode: mode, options: options)
 
@@ -1333,17 +1366,26 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     eq.updateGainsDb(db)
   }
 
-  private func handleRouteChanged() {
+  private func handleRouteChanged(reason: AVAudioSession.RouteChangeReason? = nil) {
     guard running else { return }
 
     let now = nowMs()
-    if (now - lastRouteRestartTs) < 350.0 {
+    if (now - lastRouteRestartTs) < 250.0 {
       log("⏭️[RouteChange] skip duplicate restart")
       return
     }
     lastRouteRestartTs = now
 
     updateRouteCache()
+
+    let live = liveRouteFlags()
+
+    if shouldPreferBluetoothA2DPOnRouteChange(reason: reason) {
+      wantsBluetoothA2DPPlayback = true
+      lastNonVoiceA2dpTargetTs = now
+    } else if !live.a2dp && !live.btHfp {
+      wantsBluetoothA2DPPlayback = false
+    }
 
     hasTimeline = false
     nextPlaySampleTime = 0
@@ -1354,7 +1396,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     var targetVoicePath: Bool = false
 
     if voiceMode {
-      if routeBtMic {
+      if live.btHfp {
         targetSampleRate = 16_000
         targetVoicePath = true
       } else {
@@ -1363,21 +1405,18 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       }
     } else {
       if wantsBluetoothA2DPPlayback {
-        if routeA2dp {
+        if live.a2dp {
           targetSampleRate = 44_100
           targetVoicePath = false
           lastNonVoiceA2dpTargetTs = now
-        } else if routeBtMic && (now - lastNonVoiceA2dpTargetTs) < 1800.0 {
-          log("🛡️[RouteChange] ignore transient HFP, keep trying A2DP playback path")
+        } else if live.btHfp {
+          log("🛡️[RouteChange] transient HFP detected while targeting A2DP -> force A2DP reconfigure")
           targetSampleRate = 44_100
           targetVoicePath = false
-        } else if !routeWired && !routeBtMic {
+        } else if hasAnyBluetoothOutputNow() {
           targetSampleRate = 44_100
           targetVoicePath = false
-        } else if routeBtMic {
-          targetSampleRate = 16_000
-          targetVoicePath = true
-        } else if !routeWired {
+        } else if !live.wired {
           targetSampleRate = SPEAKER_VOICE_SR
           targetVoicePath = true
         } else {
@@ -1385,13 +1424,13 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
           targetVoicePath = false
         }
       } else {
-        if routeA2dp {
+        if live.a2dp {
           targetSampleRate = 44_100
           targetVoicePath = false
-        } else if routeBtMic {
+        } else if live.btHfp {
           targetSampleRate = 16_000
           targetVoicePath = true
-        } else if !routeWired {
+        } else if !live.wired {
           targetSampleRate = SPEAKER_VOICE_SR
           targetVoicePath = true
         } else {
@@ -1401,6 +1440,12 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       }
     }
 
+    if targetVoicePath == lastVoicePath && targetSampleRate == lastSampleRate {
+      log("✅[RouteChange] no restart needed")
+      return
+    }
+
+    log("🔁[RouteChange] target voicePath=\(targetVoicePath) sr=\(targetSampleRate) wantsA2DP=\(wantsBluetoothA2DPPlayback) liveA2DP=\(live.a2dp) liveHFP=\(live.btHfp)")
     restartEngineAuto(sampleRate: targetSampleRate, voicePath: targetVoicePath)
   }
 
@@ -1410,14 +1455,31 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     let token = pendingStartToken + 1
     pendingStartToken = token
     running = false
+    isReconfiguring = true
 
     audioAsync { [weak self] in
       guard let self else { return }
+      self.log("♻️[Restart] engine stopping for route change")
       self.engine.inputNode.removeTap(onBus: 0)
       self.player.stop()
       self.engine.stop()
       self.engine.reset()
-      self.configureAndStart(sampleRate: sampleRate, voicePath: voicePath, token: token)
+
+      // ✅ FIX !int + CoreAudio silent mic: Phải deactivate AVAudioSession
+      try? self.session.setActive(false, options: [.notifyOthersOnDeactivation])
+
+      // TRÌ HOÃN 0.5 GIÂY CHO iOS FLUSH RÁC (MÔ PHỎNG NÚT BẤM HUMAN STOP/START)
+      DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { [weak self] in
+        self?.audioAsync {
+          self?.log("♻️[Restart] starting after delay...")
+          self?.configureAndStart(sampleRate: sampleRate, voicePath: voicePath, token: token)
+        }
+      }
+
+      // Xóa khiên bảo vệ dummy event iOS sau 1.5 giây an toàn tuyệt đối
+      DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+        self?.isReconfiguring = false
+      }
     }
   }
 
@@ -1437,10 +1499,18 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   }
 
   @objc private func onRouteChange(_ n: Notification) {
-    log("🔄[RouteChange] \(routeStr(session.currentRoute))")
+    if isReconfiguring {
+      log("🛡️[RouteChange] ignored because engine is reconfiguring (flush active)")
+      return
+    }
+    let raw = n.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+    let reason = raw.flatMap { AVAudioSession.RouteChangeReason(rawValue: $0) }
+
+    log("🔄[RouteChange] reason=\(String(describing: reason)) \(routeStr(session.currentRoute))")
     audioQueue.async { [weak self] in
-      self?.updateRouteCache()
-      self?.handleRouteChanged()
+      guard let self else { return }
+      self.updateRouteCache()
+      self.handleRouteChanged(reason: reason)
     }
   }
 
