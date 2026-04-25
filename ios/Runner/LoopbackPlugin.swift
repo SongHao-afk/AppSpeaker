@@ -164,7 +164,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private var routeA2dp: Bool = false
   private var routeWired: Bool = false
   private var routeBtMic: Bool = false
-  private var isReconfiguring: Bool = false
 
   private var lastRouteRestartTs: Double = 0.0
   private var didLogTapBufferFormat: Bool = false
@@ -1455,7 +1454,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     let token = pendingStartToken + 1
     pendingStartToken = token
     running = false
-    isReconfiguring = true
 
     audioAsync { [weak self] in
       guard let self else { return }
@@ -1465,21 +1463,10 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       self.engine.stop()
       self.engine.reset()
 
-      // ✅ FIX !int + CoreAudio silent mic: Phải deactivate AVAudioSession
+      // ✅ FIX !int: Phải deactivate AVAudioSession để ngắt sạch liên kết phần cứng trước khi đổi Category
       try? self.session.setActive(false, options: [.notifyOthersOnDeactivation])
 
-      // TRÌ HOÃN 0.5 GIÂY CHO iOS FLUSH RÁC (MÔ PHỎNG NÚT BẤM HUMAN STOP/START)
-      DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { [weak self] in
-        self?.audioAsync {
-          self?.log("♻️[Restart] starting after delay...")
-          self?.configureAndStart(sampleRate: sampleRate, voicePath: voicePath, token: token)
-        }
-      }
-
-      // Xóa khiên bảo vệ dummy event iOS sau 1.5 giây an toàn tuyệt đối
-      DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-        self?.isReconfiguring = false
-      }
+      self.configureAndStart(sampleRate: sampleRate, voicePath: voicePath, token: token)
     }
   }
 
@@ -1499,10 +1486,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   }
 
   @objc private func onRouteChange(_ n: Notification) {
-    if isReconfiguring {
-      log("🛡️[RouteChange] ignored because engine is reconfiguring (flush active)")
-      return
-    }
     let raw = n.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
     let reason = raw.flatMap { AVAudioSession.RouteChangeReason(rawValue: $0) }
 
