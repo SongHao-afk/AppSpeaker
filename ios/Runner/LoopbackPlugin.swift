@@ -64,8 +64,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
   private let SPEAKER_VOICE_SR: Double = 48_000
 
-  // FIX: hạ gain speaker mặc định để giảm vọng + bộp khi BuiltIn Mic -> Speaker
-  private let FIXED_GAIN_SPEAKER: Double = 1.25
+  private let FIXED_GAIN_SPEAKER: Double = 1.38
   private let FIXED_GAIN_WIRED:   Double = 2.80
   private let FIXED_GAIN_HFP:     Double = 2.50
   private let SPK_TOTAL_GAIN_CAP: Double = 2.20
@@ -106,10 +105,10 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private let A2DP_MONITOR_ATTACK: Double = 0.12
   private let A2DP_MONITOR_RELEASE: Double = 0.008
 
-  private let EXPANDER_THRESHOLD: Double = 0.010
-  private let EXPANDER_RATIO: Double = 0.30
-  private let EXPANDER_ATTACK: Double = 0.35
-  private let EXPANDER_RELEASE: Double = 0.008
+  private let EXPANDER_THRESHOLD: Double = 0.006
+  private let EXPANDER_RATIO: Double = 0.65
+  private let EXPANDER_ATTACK: Double = 0.16
+  private let EXPANDER_RELEASE: Double = 0.035
 
   private var eq: Eq5Band?
   private var hpf: OnePoleHpf?
@@ -773,7 +772,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     hpf = OnePoleHpf(fs: fs, fc: SPK_HPF_HZ)
     a2dpLpf = OnePoleLpf(fs: fs, fc: SPK_LPF_HZ)
 
-    // FIX: hạ LPF cho speaker để bớt chói/vọng ở loa ngoài iPhone
     spkLpf2 = OnePoleLpf(fs: fs, fc: 1350.0)
     harshDynLpf = OnePoleLpf(fs: fs, fc: 950.0)
 
@@ -783,11 +781,11 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
                       releaseMs: SPK_GATE_RELEASE_MS)
 
     expander = DownwardExpander(sampleRate: fs,
-                                threshold: 0.010,
-                                ratio: 2.80,
-                                attackMs: 2.0,
-                                releaseMs: 80.0,
-                                floorGain: 0.03)
+                                threshold: 0.006,
+                                ratio: 1.60,
+                                attackMs: 8.0,
+                                releaseMs: 180.0,
+                                floorGain: 0.16)
 
     afs = AntiFeedbackAfs(fs: fs)
 
@@ -930,9 +928,9 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         targetExpand = 1.0
       } else if rawRms < EXPANDER_THRESHOLD {
         let t = max(0.0, rawRms / EXPANDER_THRESHOLD)
-        targetExpand = 0.05 * pow(t, EXPANDER_RATIO)
+        targetExpand = 0.22 + 0.38 * pow(t, EXPANDER_RATIO)
       } else {
-        targetExpand = 0.60
+        targetExpand = 0.72
       }
       let k = (targetExpand < expanderGain) ? EXPANDER_ATTACK : EXPANDER_RELEASE
       expanderGain += (targetExpand - expanderGain) * k
@@ -1050,13 +1048,12 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     var combinedGain = (gCap * masterBoost * userOutGain) *
                        guardGain * micBoost * monitorGain * preDuckGain * expanderGain
 
-    // FIX: không cho speaker gain nhảy từ 0.075 lên 0.42 gây bộp/pumping
     if isSpeakerDefaultNow {
       if speechActive {
-        combinedGain = min(combinedGain, 0.26)
-        combinedGain = max(combinedGain, 0.12)
+        combinedGain = min(combinedGain, 0.34)
+        combinedGain = max(combinedGain, 0.15)
       } else {
-        combinedGain = min(combinedGain, 0.095)
+        combinedGain = min(combinedGain, 0.13)
       }
     }
 
@@ -1089,7 +1086,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       for i in 0..<n {
         var x = Double(ch0[i])
 
-        // FIX: tắt echoReducer trên speaker mặc định vì delay nhảy 10-128ms gây vọng/bộp
         if false, isSpeakerDefaultNow, let er = echoReducer {
           x = er.processMic(x, speechActive: speechActive, startupGrace: inStartupGrace)
           lastEchoCancelGain = er.currentCancelGain()
@@ -1139,7 +1135,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         x = limiter?.process(x) ?? x
         x = softClip(x)
 
-        if isSpeakerDefaultNow && rawRms < 0.014 && abs(x) < 0.022 {
+        if isSpeakerDefaultNow && rawRms < 0.006 && abs(x) < 0.010 {
           x = 0.0
         }
 
@@ -1147,7 +1143,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         outData[i] = Float(y)
         sumSq += y * y
 
-        // FIX: tắt feed speaker sample vào echoReducer trên speaker mặc định
         if false, isSpeakerDefaultNow, let er = echoReducer {
           er.pushSpeakerSample(Float(y))
         }
@@ -1156,7 +1151,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       for i in 0..<n {
         var x = Double(ch0[i])
 
-        // FIX: tắt echoReducer trên speaker mặc định vì delay nhảy 10-128ms gây vọng/bộp
         if false, isSpeakerDefaultNow, let er = echoReducer {
           x = er.processMic(x, speechActive: speechActive, startupGrace: inStartupGrace)
           lastEchoCancelGain = er.currentCancelGain()
@@ -1203,7 +1197,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         x = limiter?.process(x) ?? x
         x = softClip(x)
 
-        if isSpeakerDefaultNow && rawRms < 0.014 && abs(x) < 0.022 {
+        if isSpeakerDefaultNow && rawRms < 0.006 && abs(x) < 0.010 {
           x = 0.0
         }
 
@@ -1211,7 +1205,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         outData[i] = Float(y)
         sumSq += y * y
 
-        // FIX: tắt feed speaker sample vào echoReducer trên speaker mặc định
         if false, isSpeakerDefaultNow, let er = echoReducer {
           er.pushSpeakerSample(Float(y))
         }
