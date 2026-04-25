@@ -1,36 +1,34 @@
-import Foundation
-
 // MARK: - AntiFeedbackAfs
-// Bản này ưu tiên built-in speaker: bắt các đỉnh ring phổ biến,
-// nhưng threshold đã nới để bớt ăn nhầm giọng nói.
 final class AntiFeedbackAfs {
 
     private let fs: Double
 
-    // Các vùng hay ring/chói trên speaker phone
     private let candidates: [Double] = [
-        800.0, 1000.0, 1250.0, 1600.0, 2000.0, 2500.0, 3150.0, 4000.0, 5000.0
+        630.0, 700.0, 800.0, 1000.0, 1250.0,
+        1600.0, 2000.0, 2500.0, 3150.0,
+        4000.0, 5000.0, 6300.0
     ]
 
-    private let notchCount = 3
+    private let notchCount = 4
     private var notch: [Biquad]
     private var notchF: [Double]
     private var notchUntilMs: [Int64]
+    private var notchGain: [Double]
+    private var notchTarget: [Double]
 
-    // notch hẹp hơn để bớt làm mỏng giọng
-    private let Q: Double = 10.0
-
+    private let Q: Double = 7.0
     private var ema: [Double]
-    private let emaAlpha: Double = 0.88
+    private let emaAlpha: Double = 0.92
 
-    // giữ notch ngắn hơn để đỡ “kẹt” giọng
-    private let holdMs: Int64 = 900
+    private let holdMs: Int64 = 1600
 
     init(fs: Double) {
         self.fs = fs
         self.notch = Array(repeating: Biquad(), count: notchCount)
         self.notchF = Array(repeating: 0.0, count: notchCount)
         self.notchUntilMs = Array(repeating: 0, count: notchCount)
+        self.notchGain = Array(repeating: 0.0, count: notchCount)
+        self.notchTarget = Array(repeating: 0.0, count: notchCount)
         self.ema = Array(repeating: 1e-6, count: candidates.count)
         reset()
     }
@@ -39,7 +37,10 @@ final class AntiFeedbackAfs {
         for i in 0..<notchCount {
             notchF[i] = 0.0
             notchUntilMs[i] = 0
+            notchGain[i] = 0.0
+            notchTarget[i] = 0.0
             notch[i].setNotch(fs: fs, f0: 1000.0, q: Q)
+            notch[i].resetState()
         }
         for k in 0..<ema.count {
             ema[k] = 1e-6
@@ -57,6 +58,7 @@ final class AntiFeedbackAfs {
 
     func analyzeFloat(input: UnsafePointer<Float>, count n: Int) {
         let now = Self.nowMs()
+        if n <= 0 { return }
 
         var e = Array(repeating: 0.0, count: candidates.count)
 
@@ -82,36 +84,34 @@ final class AntiFeedbackAfs {
         let f0 = candidates[bestK]
         let bestEnergy = e[bestK]
 
-        // speaker default cần trigger sớm hơn để chặn ring / chói
-        if bestScore < 4.8 { return }
-        if bestEnergy < 3e-6 { return }
+        // Dịu hơn bản cũ: tránh bắt nhầm tiếng nói rồi notch giật gây bộp.
+        if bestScore < 6.2 { return }
+        if bestEnergy < 5e-6 { return }
 
-        // nếu notch hiện tại gần tần số đó thì chỉ refresh
         for i in 0..<notchCount {
             if notchF[i] > 0.0,
-               abs(notchF[i] - f0) < 180.0,
+               abs(notchF[i] - f0) < 160.0,
                now < notchUntilMs[i] {
                 notchUntilMs[i] = now + holdMs
+                notchTarget[i] = 1.0
                 return
             }
         }
 
-        // tìm slot rảnh
         var slot = -1
         for i in 0..<notchCount {
-            if now >= notchUntilMs[i] {
+            if now >= notchUntilMs[i] && notchGain[i] < 0.08 {
                 slot = i
                 break
             }
         }
 
-        // nếu hết slot thì thay slot có expiry sớm nhất
         if slot < 0 {
-            var minUntil = notchUntilMs[0]
+            var weakest = notchGain[0]
             slot = 0
             for i in 1..<notchCount {
-                if notchUntilMs[i] < minUntil {
-                    minUntil = notchUntilMs[i]
+                if notchGain[i] < weakest {
+                    weakest = notchGain[i]
                     slot = i
                 }
             }
@@ -120,6 +120,7 @@ final class AntiFeedbackAfs {
         notchF[slot] = f0
         notch[slot].setNotch(fs: fs, f0: f0, q: Q)
         notchUntilMs[slot] = now + holdMs
+        notchTarget[slot] = 1.0
     }
 
     @inline(__always)
@@ -128,10 +129,25 @@ final class AntiFeedbackAfs {
         let now = Self.nowMs()
 
         for i in 0..<notchCount {
-            if notchF[i] > 0.0 && now < notchUntilMs[i] {
-                x = notch[i].process(x)
+            if notchF[i] <= 0.0 { continue }
+
+            if now >= notchUntilMs[i] {
+                notchTarget[i] = 0.0
+            }
+
+            let target = notchTarget[i]
+            let k = target > notchGain[i] ? 0.10 : 0.025
+            notchGain[i] += (target - notchGain[i]) * k
+
+            let wet = notch[i].process(x)
+            x = x * (1.0 - notchGain[i]) + wet * notchGain[i]
+
+            if notchGain[i] < 0.002 && target == 0.0 {
+                notchF[i] = 0.0
+                notch[i].resetState()
             }
         }
+
         return x
     }
 
@@ -142,8 +158,7 @@ final class AntiFeedbackAfs {
         fs: Double
     ) -> Double {
         let w = 2.0 * Double.pi * freq / fs
-        let cosw = cos(w)
-        let coeff = 2.0 * cosw
+        let coeff = 2.0 * cos(w)
 
         var s0 = 0.0
         var s1 = 0.0

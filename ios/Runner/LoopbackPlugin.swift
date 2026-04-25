@@ -64,8 +64,8 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
   private let SPEAKER_VOICE_SR: Double = 48_000
 
-  // Tăng tiếng âm thanh output theo yêu cầu
-  private let FIXED_GAIN_SPEAKER: Double = 1.85
+  // FIX: hạ gain speaker mặc định để giảm vọng + bộp khi BuiltIn Mic -> Speaker
+  private let FIXED_GAIN_SPEAKER: Double = 1.25
   private let FIXED_GAIN_WIRED:   Double = 2.80
   private let FIXED_GAIN_HFP:     Double = 2.50
   private let SPK_TOTAL_GAIN_CAP: Double = 2.20
@@ -675,16 +675,11 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     log("🔥 BUILD_TAG=2026-04-23-BT-ROUTE-FIX SPEAKER_VOICE_SR=\(SPEAKER_VOICE_SR)")
     logSession("beforeConfigure")
 
-    // 1. Phân tích phần cứng qua availableInputs (không bị lỗi state do inactive)
     let ins = session.availableInputs ?? []
     let wiredAvailable = ins.contains { $0.portType == .headsetMic || $0.portType == .usbAudio }
-
-    // Chỉ dùng availableInputs để biết có device tồn tại,
-    // KHÔNG dùng nó làm quyết định cuối cho mode.
     let btHfpAvailable = ins.contains { $0.portType == .bluetoothHFP }
     let a2dpExpected = wantsBluetoothA2DPPlayback && !voicePath
 
-    // 2. Setup Options - luôn mặc định có defaultToSpeaker để phòng hờ rớt về Receiver
     var options: AVAudioSession.CategoryOptions = [.defaultToSpeaker]
     if duckOthersEnabled { options.insert(.duckOthers) }
 
@@ -697,23 +692,20 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       options.insert(.allowBluetoothA2DP)
     }
 
-    // 3. Chọn đúng Mode ngay từ đầu để tránh lỗi !int khi kích hoạt
     let liveBefore = liveRouteFlags()
 
     let mode: AVAudioSession.Mode
     if voicePath && (liveBefore.btHfp || btHfpAvailable) && !a2dpExpected {
       mode = .voiceChat
     } else {
-      mode = .default // Cho Speaker và A2DP
+      mode = .default
     }
 
     log("⚙️[configureSession] PRE-SET mode=\(mode.rawValue) options=\(options) wired=\(wiredAvailable) hfp=\(btHfpAvailable)")
 
-    // 4. Áp dụng Category và Active
     try session.setCategory(.playAndRecord, mode: mode, options: options)
     try session.setActive(true)
 
-    // 5. Lúc này session đã hoạt động 100%, đọc lại Route để ra quyết định DSP và Override
     let flags = liveRouteFlags()
     let wiredNow = flags.wired
     let a2dpNow  = flags.a2dp || a2dpExpected
@@ -780,8 +772,10 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     hpf = OnePoleHpf(fs: fs, fc: SPK_HPF_HZ)
     a2dpLpf = OnePoleLpf(fs: fs, fc: SPK_LPF_HZ)
-    spkLpf2 = OnePoleLpf(fs: fs, fc: 1600.0)
-    harshDynLpf = OnePoleLpf(fs: fs, fc: 1180.0)
+
+    // FIX: hạ LPF cho speaker để bớt chói/vọng ở loa ngoài iPhone
+    spkLpf2 = OnePoleLpf(fs: fs, fc: 1350.0)
+    harshDynLpf = OnePoleLpf(fs: fs, fc: 950.0)
 
     gate = SimpleGate(sampleRate: fs,
                       threshold: SPK_GATE_THR,
@@ -1056,12 +1050,13 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     var combinedGain = (gCap * masterBoost * userOutGain) *
                        guardGain * micBoost * monitorGain * preDuckGain * expanderGain
 
+    // FIX: không cho speaker gain nhảy từ 0.075 lên 0.42 gây bộp/pumping
     if isSpeakerDefaultNow {
       if speechActive {
-        combinedGain = min(combinedGain, 0.42)
-        combinedGain = max(combinedGain, 0.14)
+        combinedGain = min(combinedGain, 0.26)
+        combinedGain = max(combinedGain, 0.12)
       } else {
-        combinedGain = min(combinedGain, 0.075)
+        combinedGain = min(combinedGain, 0.095)
       }
     }
 
@@ -1094,7 +1089,8 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       for i in 0..<n {
         var x = Double(ch0[i])
 
-        if isSpeakerDefaultNow, let er = echoReducer {
+        // FIX: tắt echoReducer trên speaker mặc định vì delay nhảy 10-128ms gây vọng/bộp
+        if false, isSpeakerDefaultNow, let er = echoReducer {
           x = er.processMic(x, speechActive: speechActive, startupGrace: inStartupGrace)
           lastEchoCancelGain = er.currentCancelGain()
           lastEchoDelayMs = er.currentDelayMs()
@@ -1151,7 +1147,8 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         outData[i] = Float(y)
         sumSq += y * y
 
-        if isSpeakerDefaultNow, let er = echoReducer {
+        // FIX: tắt feed speaker sample vào echoReducer trên speaker mặc định
+        if false, isSpeakerDefaultNow, let er = echoReducer {
           er.pushSpeakerSample(Float(y))
         }
       }
@@ -1159,7 +1156,8 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       for i in 0..<n {
         var x = Double(ch0[i])
 
-        if isSpeakerDefaultNow, let er = echoReducer {
+        // FIX: tắt echoReducer trên speaker mặc định vì delay nhảy 10-128ms gây vọng/bộp
+        if false, isSpeakerDefaultNow, let er = echoReducer {
           x = er.processMic(x, speechActive: speechActive, startupGrace: inStartupGrace)
           lastEchoCancelGain = er.currentCancelGain()
           lastEchoDelayMs = er.currentDelayMs()
@@ -1213,7 +1211,8 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         outData[i] = Float(y)
         sumSq += y * y
 
-        if isSpeakerDefaultNow, let er = echoReducer {
+        // FIX: tắt feed speaker sample vào echoReducer trên speaker mặc định
+        if false, isSpeakerDefaultNow, let er = echoReducer {
           er.pushSpeakerSample(Float(y))
         }
       }
@@ -1345,8 +1344,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     lastBands = bb
 
-    // Chống vọng khi người dùng cố tình đẩy tất cả các thanh EQ lên max
-    // Tự động triệt tiêu lượng gain tổng dư thừa (Auto Makeup Reduction)
     var sumLinear = 0.0
     for i in 0..<5 { sumLinear += bb[i] }
     let avgLinear = sumLinear / 5.0
@@ -1463,7 +1460,6 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       self.engine.stop()
       self.engine.reset()
 
-      // ✅ FIX !int: Phải deactivate AVAudioSession để ngắt sạch liên kết phần cứng trước khi đổi Category
       try? self.session.setActive(false, options: [.notifyOthersOnDeactivation])
 
       self.configureAndStart(sampleRate: sampleRate, voicePath: voicePath, token: token)
