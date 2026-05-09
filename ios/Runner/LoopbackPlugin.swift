@@ -127,6 +127,9 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private var echoReducer: AdaptiveEchoReducer?
   private var presenceSmoother: PresenceSmoother?
 
+  private var popSmoother: SpeakerPopSmoother?
+  private var smoothedCombinedGain: Double = 0.13
+
   private var a2dpFlag: Bool = false
   private var lastA2dpCheckTs: Double = 0.0
   private var duckUntilTs: Double = 0.0
@@ -169,6 +172,11 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
   private var startWarmupUntilTs: Double = 0.0
   private var isStoppingNow: Bool = false
+
+  private var transitionInProgress: Bool = false
+  private var queuedStartVoiceMode: Bool? = nil
+  private var lastStopCompletedTs: Double = 0.0
+  private let START_AFTER_STOP_DELAY_MS: Double = 180.0
 
   private func updateRouteCache() {
     let r = session.currentRoute
@@ -326,7 +334,13 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     case "stop":
       audioQueue.async { [weak self] in
-        self?.stopLoopback()
+        guard let self else { return }
+        self.queuedStartVoiceMode = nil
+        if self.transitionInProgress {
+          self.log("🛑[Stop] requested while transitionInProgress -> will stop now")
+        }
+        self.transitionInProgress = true
+        self.stopLoopbackInternal(clearTransitionWhenDone: true)
       }
       result(nil)
 
@@ -337,19 +351,23 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       let mBoost  = (args?["masterBoost"] as? NSNumber)?.doubleValue ?? 1.0
       let list = (args?["bandGains"] as? [NSNumber])?.map { $0.doubleValue } ?? [1,1,1,1,1]
 
-      eqEnabled = enabled
-      outputGain = clamp(outGain, 0.0, 6.0)
-      masterBoost = clamp(mBoost, 0.5, 4.0)
-
-      var arr = [Double](repeating: 1.0, count: 5)
-      for i in 0..<5 {
-        let v = (i < list.count) ? list[i] : 1.0
-        arr[i] = clamp(v, 0.25, 3.0)
-      }
-      bandGains = arr
-
       audioQueue.async { [weak self] in
-        self?.applyEqIfChanged(force: true)
+        guard let self else { return }
+
+        self.eqEnabled = enabled
+        self.outputGain = self.clamp(outGain, 0.0, 6.0)
+        self.masterBoost = self.clamp(mBoost, 0.5, 4.0)
+
+        var arr = [Double](repeating: 1.0, count: 5)
+        for i in 0..<5 {
+          let v = (i < list.count) ? list[i] : 1.0
+          arr[i] = self.clamp(v, 0.25, 3.0)
+        }
+        self.bandGains = arr
+
+        self.log("🎚️[setParams] applied eq=\(enabled) out=\(self.outputGain) master=\(self.masterBoost) bands=\(self.bandGains)")
+
+        self.applyEqIfChanged(force: true)
       }
       result(nil)
 
@@ -359,11 +377,19 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       let boost = (args?["headsetBoost"] as? NSNumber)?.doubleValue ?? 2.2
       let btBoost = (args?["bluetoothBoost"] as? NSNumber)?.doubleValue ?? self.bluetoothMicBoost
 
-      preferWiredMic = v
-      headsetMicBoost = clamp(boost, 1.0, 6.0)
-      bluetoothMicBoost = clamp(btBoost, 1.0, 8.0)
+      audioQueue.async { [weak self] in
+        guard let self else { return }
 
-      if running { handleRouteChanged() }
+        self.preferWiredMic = v
+        self.headsetMicBoost = self.clamp(boost, 1.0, 6.0)
+        self.bluetoothMicBoost = self.clamp(btBoost, 1.0, 8.0)
+
+        self.log("🎙️[setPreferWiredMic] prefer=\(v) wiredBoost=\(self.headsetMicBoost) btBoost=\(self.bluetoothMicBoost)")
+
+        if self.running {
+          self.handleRouteChanged()
+        }
+      }
       result(nil)
 
     case "setDuckOthers":
@@ -438,19 +464,31 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private func startLoopback(voiceMode: Bool) {
     ensureMicPermission { [weak self] granted in
       guard let self else { return }
+
       if !granted {
         self.log("❌ Microphone permission denied -> cannot start loopback")
         return
       }
+
       self.audioQueue.async {
+        if self.transitionInProgress {
+          self.queuedStartVoiceMode = voiceMode
+          self.log("🕒[Start] queued voiceMode=\(voiceMode) because transitionInProgress")
+          return
+        }
+
+        self.transitionInProgress = true
         self._startLoopbackInternal(voiceMode: voiceMode)
       }
     }
   }
 
-  private func _startLoopbackInternal(voiceMode: Bool) {
-    stopLoopback()
+  private func _startLoopbackInternal(voiceMode requestedVoiceMode: Bool) {
+    stopLoopbackInternal(clearTransitionWhenDone: false)
+
     pendingStartToken += 1
+
+    var voiceMode = requestedVoiceMode
     lastVoiceModeRequested = voiceMode
 
     updateRouteCache()
@@ -461,42 +499,70 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     }
 
     if voiceMode && !routeBtMic {
-      startLoopback(voiceMode: false)
-      return
+      log("↩️[Start] voiceMode requested but no BT HFP mic -> fallback without recursive start")
+      voiceMode = false
+      lastVoiceModeRequested = false
     }
 
     let a2dp  = routeA2dp
     let wired = routeWired
     let hfp   = routeBtMic
 
+    let targetSampleRate: Double
+    let targetVoicePath: Bool
+
     if voiceMode {
       if hfp {
-        configureAndStart(sampleRate: 16_000, voicePath: true, token: pendingStartToken)
+        targetSampleRate = 16_000
+        targetVoicePath = true
       } else {
-        configureAndStart(sampleRate: SPEAKER_VOICE_SR, voicePath: true, token: pendingStartToken)
+        targetSampleRate = SPEAKER_VOICE_SR
+        targetVoicePath = true
+      }
+    } else if a2dp {
+      targetSampleRate = 44_100
+      targetVoicePath = false
+    } else if hfp {
+      targetSampleRate = 16_000
+      targetVoicePath = true
+    } else if !wired {
+      targetSampleRate = SPEAKER_VOICE_SR
+      targetVoicePath = true
+    } else {
+      targetSampleRate = 48_000
+      targetVoicePath = false
+    }
+
+    let token = pendingStartToken
+
+    log("🧭[Start] scheduled after stop delay voicePath=\(targetVoicePath) sr=\(targetSampleRate) token=\(token)")
+
+    audioQueue.asyncAfter(deadline: .now() + .milliseconds(Int(START_AFTER_STOP_DELAY_MS))) { [weak self] in
+      guard let self else { return }
+
+      guard token == self.pendingStartToken else {
+        self.log("⏭️[Start] canceled stale delayed start token=\(token) current=\(self.pendingStartToken)")
+        self.finishTransitionAndRunQueuedStartIfNeeded()
+        return
+      }
+
+      self.configureAndStart(sampleRate: targetSampleRate, voicePath: targetVoicePath, token: token)
+    }
+  }
+
+  private func stopLoopback() {
+    stopLoopbackInternal(clearTransitionWhenDone: true)
+  }
+
+  private func stopLoopbackInternal(clearTransitionWhenDone: Bool) {
+    if isStoppingNow {
+      log("⏭️[stopLoopback] ignored duplicate because isStoppingNow=true")
+      if clearTransitionWhenDone {
+        finishTransitionAndRunQueuedStartIfNeeded()
       }
       return
     }
 
-    if a2dp {
-      configureAndStart(sampleRate: 44_100, voicePath: false, token: pendingStartToken)
-      return
-    }
-
-    if hfp {
-      configureAndStart(sampleRate: 16_000, voicePath: true, token: pendingStartToken)
-      return
-    }
-
-    if !wired {
-      configureAndStart(sampleRate: SPEAKER_VOICE_SR, voicePath: true, token: pendingStartToken)
-      return
-    }
-
-    configureAndStart(sampleRate: 48_000, voicePath: false, token: pendingStartToken)
-  }
-
-  private func stopLoopback() {
     pendingStartToken += 1
     running = false
     isStoppingNow = true
@@ -522,6 +588,8 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     lastEchoDelayMs = 0.0
     lastPresenceMix = 0.0
 
+    smoothedCombinedGain = 0.13
+
     hasTimeline = false
     nextPlaySampleTime = 0
 
@@ -537,6 +605,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     limiter = nil
     echoReducer = nil
     presenceSmoother = nil
+    popSmoother = nil
     monoFormat = nil
 
     speechTracker = nil
@@ -544,6 +613,11 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     lastSpeechActive = false
     lastSpeechScore = 0.0
     lastZcr = 0.0
+
+    lastEqEnabled = true
+    lastGain = -999.0
+    lastMaster = -999.0
+    lastBands = [-999.0, -999.0, -999.0, -999.0, -999.0]
 
     poolLock.lock()
     freePool.removeAll()
@@ -556,10 +630,27 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       self.engine.stop()
       self.engine.reset()
       try? self.session.setActive(false, options: [.notifyOthersOnDeactivation])
+      self.lastStopCompletedTs = self.nowMs()
       self.log("⏹[stopLoopback] stopped + deactivated session")
     }
 
     isStoppingNow = false
+
+    if clearTransitionWhenDone {
+      finishTransitionAndRunQueuedStartIfNeeded()
+    }
+  }
+
+  private func finishTransitionAndRunQueuedStartIfNeeded() {
+    transitionInProgress = false
+
+    guard let queued = queuedStartVoiceMode else { return }
+
+    queuedStartVoiceMode = nil
+    transitionInProgress = true
+
+    log("▶️[Start] running queued start voiceMode=\(queued)")
+    _startLoopbackInternal(voiceMode: queued)
   }
 
   private func configureAndStart(sampleRate: Double, voicePath: Bool, token: Int) {
@@ -659,11 +750,15 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         self.nextPlaySampleTime = 0
 
         self.running = true
+        self.transitionInProgress = false
         self.log("✅[Engine] started voicePath=\(voicePath) sampleRatePref=\(sampleRate) inputSR=\(hwFs)")
         self.logSession("afterEngineStart")
+        self.finishTransitionAndRunQueuedStartIfNeeded()
       } catch {
         self.running = false
+        self.transitionInProgress = false
         self.log("❌[Engine] start failed error=\(error)")
+        self.finishTransitionAndRunQueuedStartIfNeeded()
       }
     }
   }
@@ -818,6 +913,8 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     echoReducer = AdaptiveEchoReducer(sampleRate: fs)
     presenceSmoother = PresenceSmoother(sampleRate: fs)
+    popSmoother = SpeakerPopSmoother()
+    smoothedCombinedGain = 0.13
 
     hpf?.resetState()
     a2dpLpf?.resetState()
@@ -832,6 +929,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     speakerGuardCtl?.reset()
     echoReducer?.reset()
     presenceSmoother?.reset()
+    popSmoother?.reset()
 
     lastEchoCancelGain = 0.0
     lastEchoDelayMs = 0.0
@@ -873,11 +971,13 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         speakerGuardCtl?.reset()
         echoReducer?.reset()
         presenceSmoother?.reset()
+        popSmoother?.reset()
         duckUntilTs = 0.0
         startWarmupUntilTs = now + 450.0
         lastEchoCancelGain = 0.0
         lastEchoDelayMs = 0.0
         lastPresenceMix = 0.0
+        smoothedCombinedGain = 0.13
 
         hasTimeline = false
         nextPlaySampleTime = 0
@@ -976,33 +1076,33 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
       if inStartupGrace {
         if rawRms > 0.12 {
-          targetHarshMix = 0.36
+          targetHarshMix = 0.30
         } else {
-          targetHarshMix = 0.18
+          targetHarshMix = 0.14
         }
       } else if speechActive {
         if rawRms > 0.14 {
-          targetHarshMix = 0.38
+          targetHarshMix = 0.30
         } else if rawRms > 0.08 {
-          targetHarshMix = 0.28
+          targetHarshMix = 0.22
         } else {
-          targetHarshMix = 0.14
+          targetHarshMix = 0.10
         }
       } else {
         if rawRms < 0.012 {
           targetHarshMix = 0.0
         } else if rawRms > 0.14 {
-          targetHarshMix = 0.44
+          targetHarshMix = 0.34
         } else if rawRms > 0.08 {
-          targetHarshMix = 0.32
+          targetHarshMix = 0.24
         } else if rawRms > 0.04 {
-          targetHarshMix = 0.20
+          targetHarshMix = 0.14
         } else {
-          targetHarshMix = 0.10
+          targetHarshMix = 0.08
         }
       }
 
-      let k = (targetHarshMix > harshMix) ? 0.18 : 0.06
+      let k = (targetHarshMix > harshMix) ? 0.12 : 0.05
       harshMix += (targetHarshMix - harshMix) * k
     } else {
       harshMix = 0.0
@@ -1050,11 +1150,15 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     if isSpeakerDefaultNow {
       if speechActive {
-        combinedGain = min(combinedGain, 0.34)
-        combinedGain = max(combinedGain, 0.15)
+        combinedGain = min(combinedGain, 0.30)
+        combinedGain = max(combinedGain, 0.14)
       } else {
-        combinedGain = min(combinedGain, 0.13)
+        combinedGain = min(combinedGain, 0.12)
       }
+
+      let k = combinedGain > smoothedCombinedGain ? 0.045 : 0.12
+      smoothedCombinedGain += (combinedGain - smoothedCombinedGain) * k
+      combinedGain = smoothedCombinedGain
     }
 
     if a2dpFlag { combinedGain = min(combinedGain, A2DP_TOTAL_GAIN_CAP) }
@@ -1139,6 +1243,10 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
           x = 0.0
         }
 
+        if isSpeakerDefaultNow {
+          x = popSmoother?.process(x, rawRms: rawRms, rise: rise, speechActive: speechActive) ?? x
+        }
+
         let y = x.clamp(-1.0, 1.0)
         outData[i] = Float(y)
         sumSq += y * y
@@ -1199,6 +1307,10 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
         if isSpeakerDefaultNow && rawRms < 0.006 && abs(x) < 0.010 {
           x = 0.0
+        }
+
+        if isSpeakerDefaultNow {
+          x = popSmoother?.process(x, rawRms: rawRms, rise: rise, speechActive: speechActive) ?? x
         }
 
         let y = x.clamp(-1.0, 1.0)
@@ -1439,6 +1551,11 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   }
 
   private func restartEngineAuto(sampleRate: Double, voicePath: Bool) {
+    if transitionInProgress {
+      log("⏭️[Restart] skipped because transitionInProgress")
+      return
+    }
+
     if voicePath == lastVoicePath && sampleRate == lastSampleRate { return }
 
     let token = pendingStartToken + 1
@@ -1521,6 +1638,48 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
   private func nowMs() -> Double { CACurrentMediaTime() * 1000.0 }
   private func clamp(_ x: Double, _ lo: Double, _ hi: Double) -> Double { min(hi, max(lo, x)) }
+}
+
+final class SpeakerPopSmoother {
+  private var last: Double = 0.0
+  private var gain: Double = 1.0
+
+  private let maxStepNormal: Double = 0.030
+  private let maxStepHot: Double = 0.018
+
+  func reset() {
+    last = 0.0
+    gain = 1.0
+  }
+
+  @inline(__always)
+  func process(_ xIn: Double, rawRms: Double, rise: Double, speechActive: Bool) -> Double {
+    var x = xIn
+
+    let hot = rawRms > 0.14 || abs(rise) > 0.055
+    let maxStep = hot ? maxStepHot : maxStepNormal
+
+    let d = x - last
+    if d > maxStep {
+      x = last + maxStep
+    } else if d < -maxStep {
+      x = last - maxStep
+    }
+
+    let targetGain: Double
+    if hot {
+      targetGain = speechActive ? 0.86 : 0.72
+    } else {
+      targetGain = 1.0
+    }
+
+    let k = targetGain < gain ? 0.22 : 0.035
+    gain += (targetGain - gain) * k
+
+    let y = x * gain
+    last = y
+    return y
+  }
 }
 
 fileprivate extension Double {
