@@ -2,8 +2,10 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:flutter_application_3/HomePage.dart';
-import 'package:flutter_application_3/background_service.dart';
+import 'package:flutter_application_3/screens/home/home_screen.dart';
+import 'package:flutter_application_3/services/background_service.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:flutter_application_3/cubits/home_cubit.dart';
 
 void main() {
   // ✅ TEST LOG: mỗi 1s in ra để chắc chắn terminal nhận log Dart
@@ -23,6 +25,12 @@ class MainApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(home: WithForegroundTask(child: const Homepage()));
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: BlocProvider(
+        create: (context) => HomeCubit(),
+        child: WithForegroundTask(child: const Homepage()),
+      ),
+    );
   }
 }
