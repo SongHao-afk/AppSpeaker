@@ -1,4 +1,4 @@
-// DspEq.kt
+// DspEq.kt (FINAL: separated Low/Bass/Mid/Treble/High bands)
 package com.example.flutter_application_3
 
 import kotlin.math.*
@@ -12,11 +12,16 @@ internal class Biquad {
   private var z1 = 0.0
   private var z2 = 0.0
 
+  fun reset() {
+    z1 = 0.0
+    z2 = 0.0
+  }
+
   fun process(x: Double): Double {
     val y = b0 * x + z1
     z1 = b1 * x - a1 * y + z2
     z2 = b2 * x - a2 * y
-    return y
+    return if (y.isFinite()) y else 0.0
   }
 
   private fun setNorm(
@@ -32,96 +37,124 @@ internal class Biquad {
   }
 
   fun setPeaking(fs: Double, f0: Double, q: Double, gainDb: Double) {
-    val A = 10.0.pow(gainDb / 40.0)
+    val db = gainDb.coerceIn(-24.0, 24.0)
+    val A = 10.0.pow(db / 40.0)
     val w0 = 2.0 * Math.PI * (f0 / fs)
     val cw = cos(w0)
     val sw = sin(w0)
-    val alpha = sw / (2.0 * q)
+    val alpha = sw / (2.0 * q.coerceAtLeast(0.05))
 
-    val b0u = 1.0 + alpha * A
-    val b1u = -2.0 * cw
-    val b2u = 1.0 - alpha * A
-    val a0u = 1.0 + alpha / A
-    val a1u = -2.0 * cw
-    val a2u = 1.0 - alpha / A
-    setNorm(b0u, b1u, b2u, a0u, a1u, a2u)
+    setNorm(
+      1.0 + alpha * A,
+      -2.0 * cw,
+      1.0 - alpha * A,
+      1.0 + alpha / A,
+      -2.0 * cw,
+      1.0 - alpha / A
+    )
   }
 
   fun setLowShelf(fs: Double, f0: Double, slope: Double, gainDb: Double) {
-    val A = 10.0.pow(gainDb / 40.0)
+    val db = gainDb.coerceIn(-24.0, 24.0)
+    val A = 10.0.pow(db / 40.0)
     val w0 = 2.0 * Math.PI * (f0 / fs)
     val cw = cos(w0)
     val sw = sin(w0)
     val sqrtA = sqrt(A)
-    val alpha = sw / 2.0 * sqrt((A + 1.0 / A) * (1.0 / slope - 1.0) + 2.0)
+    val s = slope.coerceIn(0.1, 2.0)
+    val alpha = sw / 2.0 * sqrt((A + 1.0 / A) * (1.0 / s - 1.0) + 2.0)
 
-    val b0u = A * ((A + 1) - (A - 1) * cw + 2 * sqrtA * alpha)
-    val b1u = 2 * A * ((A - 1) - (A + 1) * cw)
-    val b2u = A * ((A + 1) - (A - 1) * cw - 2 * sqrtA * alpha)
-    val a0u = (A + 1) + (A - 1) * cw + 2 * sqrtA * alpha
-    val a1u = -2 * ((A - 1) + (A + 1) * cw)
-    val a2u = (A + 1) + (A - 1) * cw - 2 * sqrtA * alpha
-    setNorm(b0u, b1u, b2u, a0u, a1u, a2u)
+    setNorm(
+      A * ((A + 1.0) - (A - 1.0) * cw + 2.0 * sqrtA * alpha),
+      2.0 * A * ((A - 1.0) - (A + 1.0) * cw),
+      A * ((A + 1.0) - (A - 1.0) * cw - 2.0 * sqrtA * alpha),
+      (A + 1.0) + (A - 1.0) * cw + 2.0 * sqrtA * alpha,
+      -2.0 * ((A - 1.0) + (A + 1.0) * cw),
+      (A + 1.0) + (A - 1.0) * cw - 2.0 * sqrtA * alpha
+    )
   }
 
   fun setHighShelf(fs: Double, f0: Double, slope: Double, gainDb: Double) {
-    val A = 10.0.pow(gainDb / 40.0)
+    val db = gainDb.coerceIn(-24.0, 24.0)
+    val A = 10.0.pow(db / 40.0)
     val w0 = 2.0 * Math.PI * (f0 / fs)
     val cw = cos(w0)
     val sw = sin(w0)
     val sqrtA = sqrt(A)
-    val alpha = sw / 2.0 * sqrt((A + 1.0 / A) * (1.0 / slope - 1.0) + 2.0)
+    val s = slope.coerceIn(0.1, 2.0)
+    val alpha = sw / 2.0 * sqrt((A + 1.0 / A) * (1.0 / s - 1.0) + 2.0)
 
-    val b0u = A * ((A + 1) + (A - 1) * cw + 2 * sqrtA * alpha)
-    val b1u = -2 * A * ((A - 1) + (A + 1) * cw)
-    val b2u = A * ((A + 1) + (A - 1) * cw - 2 * sqrtA * alpha)
-    val a0u = (A + 1) - (A - 1) * cw + 2 * sqrtA * alpha
-    val a1u = 2 * ((A - 1) - (A + 1) * cw)
-    val a2u = (A + 1) - (A - 1) * cw - 2 * sqrtA * alpha
-    setNorm(b0u, b1u, b2u, a0u, a1u, a2u)
+    setNorm(
+      A * ((A + 1.0) + (A - 1.0) * cw + 2.0 * sqrtA * alpha),
+      -2.0 * A * ((A - 1.0) + (A + 1.0) * cw),
+      A * ((A + 1.0) + (A - 1.0) * cw - 2.0 * sqrtA * alpha),
+      (A + 1.0) - (A - 1.0) * cw + 2.0 * sqrtA * alpha,
+      2.0 * ((A - 1.0) - (A + 1.0) * cw),
+      (A + 1.0) - (A - 1.0) * cw - 2.0 * sqrtA * alpha
+    )
   }
 
   fun setNotch(fs: Double, f0: Double, q: Double) {
-    val w0 = 2.0 * Math.PI * (f0 / fs)
+    val w0 = 2.0 * Math.PI * f0 / fs
     val cw = cos(w0)
     val sw = sin(w0)
-    val alpha = sw / (2.0 * q)
+    val alpha = sw / (2.0 * q.coerceAtLeast(0.05))
 
-    val b0u = 1.0
-    val b1u = -2.0 * cw
-    val b2u = 1.0
-    val a0u = 1.0 + alpha
-    val a1u = -2.0 * cw
-    val a2u = 1.0 - alpha
-    setNorm(b0u, b1u, b2u, a0u, a1u, a2u)
+    setNorm(
+      1.0, -2.0 * cw, 1.0,
+      1.0 + alpha, -2.0 * cw, 1.0 - alpha
+    )
   }
 }
 
 internal class Eq5Band(private val fs: Double) {
   private val low = Biquad()
-  private val m1 = Biquad()
-  private val m2 = Biquad()
-  private val m3 = Biquad()
+  private val bass = Biquad()
+  private val mid = Biquad()
+  private val treble = Biquad()
   private val high = Biquad()
 
+  private val gainsDb = DoubleArray(5) { 0.0 }
+
+  init { updateGainsDb(gainsDb) }
+
+  fun reset() {
+    low.reset()
+    bass.reset()
+    mid.reset()
+    treble.reset()
+    high.reset()
+  }
+
+  /**
+   * db order:
+   * [0] Low    = sub/trầm nền       ~ 75Hz shelf
+   * [1] Bass   = lực bass           ~ 170Hz bell
+   * [2] Mid    = giọng/vang         ~ 1.1kHz bell rộng
+   * [3] Treble = chói/sắc           ~ 5.2kHz bell
+   * [4] High   = sáng/chi tiết      ~ 9.5kHz shelf
+   */
   fun updateGainsDb(db: DoubleArray) {
-    low.setLowShelf(fs, 60.0, 1.0, db[0])
-    m1.setPeaking(fs, 230.0, 1.0, db[1])
-    m2.setPeaking(fs, 910.0, 1.0, db[2])
-    m3.setPeaking(fs, 3600.0, 1.0, db[3])
+    if (db.size < 5) return
+    for (i in 0 until 5) gainsDb[i] = db[i].coerceIn(-24.0, 24.0)
+
+    low.setLowShelf(fs, 75.0, 0.70, gainsDb[0])
+    bass.setPeaking(fs, 170.0, 0.80, gainsDb[1])
+    mid.setPeaking(fs, 1100.0, 0.55, gainsDb[2])
+    treble.setPeaking(fs, 5200.0, 1.05, gainsDb[3])
 
     val nyq = fs * 0.5
-    val fHigh = min(14000.0, nyq * 0.90)
-    high.setHighShelf(fs, fHigh, 1.0, db[4])
+    val highFreq = min(9500.0, nyq * 0.82)
+    high.setHighShelf(fs, highFreq, 0.85, gainsDb[4])
   }
 
   fun process(x: Double): Double {
     var y = x
     y = low.process(y)
-    y = m1.process(y)
-    y = m2.process(y)
-    y = m3.process(y)
+    y = bass.process(y)
+    y = mid.process(y)
+    y = treble.process(y)
     y = high.process(y)
-    return y
+    return if (y.isFinite()) y else 0.0
   }
 }

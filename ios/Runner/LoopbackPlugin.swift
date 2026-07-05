@@ -54,7 +54,7 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private var wantsBluetoothA2DPPlayback: Bool = false
   private var lastNonVoiceA2dpTargetTs: Double = 0.0
 
-  private let A2DP_SAFE_GAIN_CAP: Double = 1.35
+  private let A2DP_SAFE_GAIN_CAP: Double = 2.20
   private let A2DP_TOTAL_GAIN_CAP: Double = 2.40
   private let FEEDBACK_RMS_THRESHOLD: Double = 0.18
   private let FEEDBACK_RISE_THRESHOLD: Double = 0.035
@@ -69,12 +69,12 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private let FIXED_GAIN_HFP:     Double = 2.50
   private let SPK_TOTAL_GAIN_CAP: Double = 2.20
 
-  private let A2DP_HPF_HZ: Double = 220.0
+  private let A2DP_HPF_HZ: Double = 50.0
   private let A2DP_AFS_ANALYZE_MS: Double = 100.0
   private let A2DP_DUCK_MS: Double = 450.0
   private let A2DP_EARLY_MUTE_RMS: Double = 0.30
   private let A2DP_EARLY_MUTE_RISE: Double = 0.08
-  private let A2DP_LPF_HZ: Double = 8500.0
+  private let A2DP_LPF_HZ: Double = 12000.0
   private let A2DP_GATE_THR: Double = 0.012
   private let A2DP_GATE_ATTACK_MS: Double = 4.0
   private let A2DP_GATE_RELEASE_MS: Double = 260.0
@@ -1186,7 +1186,9 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     var sumSq: Double = 0
 
-    if eqEnabled {
+    let useEqForThisRoute = eqEnabled && a2dpFlag
+
+    if useEqForThisRoute {
       for i in 0..<n {
         var x = Double(ch0[i])
 
@@ -1432,36 +1434,35 @@ public final class LoopbackPlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     lastGain = outputGain
     lastMaster = masterBoost
 
-    var bb = bandGains
-
-    if a2dpFlag {
-      bb[2] = min(bb[2], 1.05)
-      bb[3] = min(bb[3], 1.10)
-      bb[4] = min(bb[4], 1.10)
-    }
-
-    if lastVoicePath {
-      bb[1] = min(bb[1], 0.92)
-      bb[2] = min(bb[2], 0.58)
-      bb[3] = min(bb[3], 0.32)
-      bb[4] = min(bb[4], 0.16)
-    }
-
+    let bb = bandGains
     lastBands = bb
 
-    var sumLinear = 0.0
-    for i in 0..<5 { sumLinear += bb[i] }
-    let avgLinear = sumLinear / 5.0
-
-    var makeup = 1.0
-    if avgLinear > 1.25 {
-        makeup = 1.25 / avgLinear
+    // IMPORTANT:
+    // Old code converted 5 sliders to almost the same "volume" change, then capped
+    // Mid/Treble/High on A2DP. That made EQ sound weak and unclear.
+    // New mapping keeps 1.0 = 0dB and spreads each slider to a strong EQ dB range.
+    // Flutter current range is expected around 0.25...3.0:
+    //   0.25 -> -18dB
+    //   1.00 ->   0dB
+    //   3.00 -> +18dB
+    func sliderToDb(_ vIn: Double) -> Double {
+      let v = clamp(vIn, 0.25, 3.0)
+      if v >= 1.0 {
+        return ((v - 1.0) / 2.0) * 18.0
+      } else {
+        return ((v - 1.0) / 0.75) * 18.0
+      }
     }
 
-    var db = [Double](repeating: 0, count: 5)
+    var db = [Double](repeating: 0.0, count: 5)
     for i in 0..<5 {
-      let gi = max(0.0001, bb[i] * makeup)
-      db[i] = 20.0 * log10(gi)
+      db[i] = sliderToDb(bb[i])
+    }
+
+    // EQ is only meant to color Bluetooth A2DP output.
+    // Voice/HFP path keeps filters neutral to avoid telephone-quality harshness.
+    if lastVoicePath {
+      db = [0.0, 0.0, 0.0, 0.0, 0.0]
     }
 
     eq.updateGainsDb(db)

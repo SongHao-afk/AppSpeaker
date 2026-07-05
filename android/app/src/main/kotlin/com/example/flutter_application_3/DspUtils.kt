@@ -1,15 +1,16 @@
-// DspUtils.kt (ADDED: SimpleLimiter for safer A2DP loudness)
 package com.example.flutter_application_3
 
 import kotlin.math.*
 
 internal fun softClipCubic(xIn: Double): Double {
   if (!xIn.isFinite()) return 0.0
-  var x = xIn
-  if (x > 2.5) x = 2.5
-  if (x < -2.5) x = -2.5
+  val x = xIn.coerceIn(-1.5, 1.5)
   val y = x - (x * x * x) / 3.0
   return y.coerceIn(-1.0, 1.0)
+}
+
+internal fun dbToGain(db: Double): Double {
+  return 10.0.pow(db / 20.0)
 }
 
 internal class OnePoleHpf(fs: Double, fc: Double) {
@@ -45,31 +46,27 @@ internal class SimpleCompressor(
   private val rat = ratio.coerceAtLeast(1.0)
   private val atk = exp(-1.0 / (sampleRate * (attackMs / 1000.0)).coerceAtLeast(1e-6))
   private val rel = exp(-1.0 / (sampleRate * (releaseMs / 1000.0)).coerceAtLeast(1e-6))
-
   private var env = 0.0
 
   fun process(xIn: Double): Double {
-    var x = xIn
-    val a = abs(x)
+    val a = abs(xIn)
 
     env = if (a > env) atk * env + (1.0 - atk) * a
     else rel * env + (1.0 - rel) * a
 
-    if (env <= thr) return x
+    if (env <= thr) return xIn
 
     val over = env / thr
-    val gain = (over).pow((1.0 / rat) - 1.0)
-    x *= gain
-    return x
+    val gain = over.pow((1.0 / rat) - 1.0)
+    return xIn * gain
   }
 }
 
-// ✅ ADDED: true limiter to prevent A2DP peak blow-up (reduces squeal/harsh feedback)
 internal class SimpleLimiter(
   sampleRate: Double,
-  ceiling: Double = 0.90,
-  attackMs: Double = 1.2,
-  releaseMs: Double = 140.0
+  ceiling: Double = 0.92,
+  attackMs: Double = 0.8,
+  releaseMs: Double = 80.0
 ) {
   private val ceil = ceiling.coerceIn(0.2, 0.98)
   private val atk = exp(-1.0 / (sampleRate * (attackMs / 1000.0)).coerceAtLeast(1e-6))
@@ -80,7 +77,7 @@ internal class SimpleLimiter(
 
   fun process(xIn: Double): Double {
     val a = abs(xIn)
-    val need = if (a > ceil) (ceil / (a + 1e-12)) else 1.0
+    val need = if (a > ceil) ceil / (a + 1e-12) else 1.0
 
     g = if (need < g) atk * g + (1.0 - atk) * need
     else rel * g + (1.0 - rel) * need

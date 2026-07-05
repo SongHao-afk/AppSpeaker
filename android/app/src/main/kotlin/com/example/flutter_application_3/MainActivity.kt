@@ -1,4 +1,4 @@
-// MainActivity.kt (A2DP louder + limiter + smoother guard + sidetone suppression to reduce "vang" feeling)
+// MainActivity.kt (FINAL: separated 5-band EQ for Bluetooth A2DP, bypass on normal output)
 package com.example.flutter_application_3
 
 import android.bluetooth.BluetoothAdapter
@@ -51,6 +51,44 @@ class MainActivity : FlutterActivity() {
   @Volatile private var outputGain: Double = 1.0
   @Volatile private var bandGains: DoubleArray = doubleArrayOf(1.0, 1.0, 1.0, 1.0, 1.0)
 
+  // Flutter cũ đang gửi gain kiểu 0.5..1.5. Nếu đổi thẳng sang dB thì chỉ ~ -6..+3.5dB nên nghe rất nhẹ.
+  // Hàm này ép slider 0.5..1.5 thành -15..+15dB để kéo Low/Bass/Mid/Treble/High nghe khác rõ trên Bluetooth.
+  /**
+   * EQ 5 band order from Flutter MUST be:
+   * [0] Low, [1] Bass, [2] Mid, [3] Treble, [4] High
+   *
+   * Flutter cũ thường gửi 0.5..1.5, 1.0 = flat.
+   * Hàm này map mạnh theo từng band để kéo là nghe rõ:
+   * Low/Bass = trầm/nặng, Mid = vang/giọng, Treble = chói/sắc, High = sáng/chi tiết.
+   */
+  private fun sliderBandToDb(index: Int, v: Double): Double {
+    if (!v.isFinite()) return 0.0
+
+    val maxBoost = when (index) {
+      0 -> 18.0 // Low
+      1 -> 18.0 // Bass
+      2 -> 16.0 // Mid
+      3 -> 20.0 // Treble: cho chói rõ
+      4 -> 18.0 // High
+      else -> 16.0
+    }
+    val maxCut = when (index) {
+      0 -> 18.0
+      1 -> 18.0
+      2 -> 16.0
+      3 -> 18.0
+      4 -> 18.0
+      else -> 16.0
+    }
+
+    // Nếu Flutter gửi trực tiếp dB thì nhận luôn.
+    if (v < 0.0 || v > 3.5) return v.coerceIn(-maxCut, maxBoost)
+
+    // Gain slider: 0.5 -> -maxCut dB, 1.0 -> 0 dB, 1.5 -> +maxBoost dB.
+    val normalized = ((v - 1.0) / 0.5).coerceIn(-1.0, 1.0)
+    return if (normalized >= 0.0) normalized * maxBoost else normalized * maxCut
+  }
+
   // SCO wait
   private var scoReceiver: BroadcastReceiver? = null
   @Volatile private var pendingStartToken: Int = 0
@@ -68,7 +106,7 @@ class MainActivity : FlutterActivity() {
 
   // ================== ✅ Anti-feedback tuning for A2DP ==================
   // ✅ PATCH: hạ cap chút để bớt hú + bớt “vang chói”
-  private val A2DP_SAFE_GAIN_CAP = 0.70
+  private val A2DP_SAFE_GAIN_CAP = 1.00
 
   private val FEEDBACK_RMS_THRESHOLD = 0.20
   private val FEEDBACK_RISE_THRESHOLD = 0.045
@@ -84,15 +122,15 @@ class MainActivity : FlutterActivity() {
   // =================================================================
 
   // ================== ✅ A2DP "mixer style" noise/feedback controls ==================
-  private val A2DP_HPF_HZ = 220.0
+  private val A2DP_HPF_HZ = 45.0
 
   private val A2DP_AFS_ANALYZE_MS = 100L
   private val A2DP_DUCK_MS = 450L
   private val A2DP_EARLY_MUTE_RMS = 0.30
   private val A2DP_EARLY_MUTE_RISE = 0.08
 
-  private val A2DP_LPF_HZ = 8500.0
-  private val A2DP_GATE_THR = 0.012
+  private val A2DP_LPF_HZ = 16000.0
+  private val A2DP_GATE_THR = 0.006
   private val A2DP_GATE_ATTACK_MS = 4.0
   private val A2DP_GATE_RELEASE_MS = 260.0
   // =====================================================================
@@ -106,7 +144,7 @@ class MainActivity : FlutterActivity() {
   // ✅ ADDED: effective values (để mic không bị đè quá nhỏ khi nói trên A2DP)
   // Không xoá/sửa các constant cũ; chỉ dùng "effective" trong loop
   private val A2DP_TALK_RMS_EFFECTIVE = 0.030
-  private val A2DP_MONITOR_MIN_EFFECTIVE = 0.60
+  private val A2DP_MONITOR_MIN_EFFECTIVE = 0.85
   // ====================================================================
 
   // ================== ✅ FIX: robust BT headset (HFP/HSP) detection via profile proxy ==================
@@ -323,7 +361,7 @@ class MainActivity : FlutterActivity() {
               val arr = DoubleArray(5)
               for (i in 0 until 5) {
                 val v = if (i < list.size) list[i].toDouble() else 1.0
-                arr[i] = v.coerceIn(0.25, 3.0)
+                arr[i] = if (v < 0.0 || v > 3.5) v.coerceIn(-20.0, 20.0) else v.coerceIn(0.0, 2.0)
               }
               bandGains = arr
               result.success(null)
@@ -628,7 +666,7 @@ class MainActivity : FlutterActivity() {
     )
 
     val isA2dpOutNow = (!voicePath) && (findBtA2dpOutput() != null) && (findWiredOutput() == null)
-    if (isA2dpOutNow) Log.w(TAG, "A2DP output active -> enable anti-feedback guard + cap gain (CAP=$A2DP_SAFE_GAIN_CAP)")
+    if (isA2dpOutNow) Log.w(TAG, "A2DP output active -> EQ enabled on Bluetooth output")
 
     val isBuiltInMicNow = (!usingWiredMic) && (findBuiltInMic() != null)
     val forceVoiceCommForA2dp = isA2dpOutNow && isBuiltInMicNow
@@ -726,8 +764,8 @@ class MainActivity : FlutterActivity() {
     if (isWiredOutNow) {
       try { player?.setVolume(2.0f) } catch (_: Exception) {}
     } else if (isA2dpOutNow) {
-      // lower slightly to reduce initial feedback loudness
-      try { player?.setVolume(0.95f) } catch (_: Exception) {}
+      // Bluetooth output: keep full volume, EQ/limiter will handle peaks
+      try { player?.setVolume(1.0f) } catch (_: Exception) {}
     } else {
       try { player?.setVolume(1.0f) } catch (_: Exception) {}
     }
@@ -751,18 +789,18 @@ class MainActivity : FlutterActivity() {
     val afs = AntiFeedbackAfs(effectiveSampleRate.toDouble())
     val comp = SimpleCompressor(
       sampleRate = effectiveSampleRate.toDouble(),
-      threshold = 0.28,
-      ratio = 2.5,
-      attackMs = 8.0,
-      releaseMs = 180.0
+      threshold = 0.55,
+      ratio = 1.6,
+      attackMs = 5.0,
+      releaseMs = 120.0
     )
 
     // ===================== ✅ PATCH: cleaner limiter for A2DP =====================
     val limiter = SimpleLimiter(
       sampleRate = effectiveSampleRate.toDouble(),
-      ceiling = 0.86,   // sạch hơn, ít bể/harsh
-      attackMs = 0.8,   // bắt peak nhanh hơn
-      releaseMs = 180.0 // nhả chậm hơn chút để đỡ "rè"
+      ceiling = 0.94,   // giữ headroom nhưng không bóp EQ quá nhiều
+      attackMs = 0.6,   // bắt peak nhanh
+      releaseMs = 90.0  // nhả nhanh hơn để EQ nghe rõ
     )
     // ============================================================================
 
@@ -782,9 +820,9 @@ class MainActivity : FlutterActivity() {
       // ====================================================================================================
       val buf = ShortArray(chunkSize)
 
-      var lastEqEnabled = eqEnabled
-      var lastGain = outputGain
-      var lastBands = bandGains.copyOf()
+      var lastEqEnabled = !eqEnabled // force first EQ update
+      var lastGain = Double.NaN
+      var lastBands = DoubleArray(5) { Double.NaN }
 
       var a2dpFlag = isA2dpOutNow
       var lastA2dpCheckTs = 0L
@@ -811,18 +849,18 @@ class MainActivity : FlutterActivity() {
             bb[4] = min(bb[4], 1.35)
           }
 
-          if (a2dpFlag) {
-            bb[2] = min(bb[2], 1.05)
-            bb[3] = min(bb[3], 1.10)
-            bb[4] = min(bb[4], 1.10)
-          }
+          // IMPORTANT: do NOT cap EQ on Bluetooth.
+          // If we cap mid/treble/high here, dragging the 5 EQ sliders will sound almost unchanged.
 
           lastBands = bb.copyOf()
-          val db = DoubleArray(5) { i ->
-            val gi = lastBands[i].coerceAtLeast(0.0001)
-            20.0 * ln(gi) / ln(10.0)
-          }
+
+          // Strong EQ mapping:
+          // - Flutter cũ gửi 0.5..1.5 => map thành -15..+15dB.
+          // - Flutter mới gửi dB trực tiếp => dùng luôn.
+          val db = DoubleArray(5) { i -> sliderBandToDb(i, lastBands[i]) }
+
           eq.updateGainsDb(db)
+          Log.d(TAG, "EQ db Low=${"%.1f".format(db[0])} Bass=${"%.1f".format(db[1])} Mid=${"%.1f".format(db[2])} Treble=${"%.1f".format(db[3])} High=${"%.1f".format(db[4])}")
         }
       }
 
@@ -897,7 +935,7 @@ class MainActivity : FlutterActivity() {
 
         refreshEqIfChanged()
 
-        val en = lastEqEnabled
+        val en = lastEqEnabled && a2dpFlag
         val gRaw = lastGain
 
         // ✅ FIX: bluetoothMicBoost trước đây chỉ ăn khi voicePath=true (SCO).
@@ -911,7 +949,7 @@ class MainActivity : FlutterActivity() {
           else -> 1.0
         } * a2dpMicBoost
 
-        val g = if (a2dpFlag) min(gRaw, A2DP_SAFE_GAIN_CAP) else gRaw
+        val g = gRaw
 
         // ✅ PATCH: áp monitorGain vào output
         val combinedGain = g * guardGain * micBoost * monitorGain
@@ -927,7 +965,9 @@ class MainActivity : FlutterActivity() {
 
         val duckNow = a2dpFlag && (now < duckUntilTs)
 
-        if (en) {
+        val applyEqNow = en && a2dpFlag
+
+        if (applyEqNow) {
           for (i in 0 until n) {
             var x = buf[i].toDouble() / 32768.0
 
@@ -937,7 +977,7 @@ class MainActivity : FlutterActivity() {
             if (a2dpFlag) {
               x = hpf.process(x)
               x = a2dpLpf.process(x)
-              x = if (gateBypass) x * 0.18 else gate.process(x)
+              x = if (gateBypass) x * 0.65 else gate.process(x)
               x = afs.process(x)
             }
 
@@ -966,7 +1006,7 @@ class MainActivity : FlutterActivity() {
             if (a2dpFlag) {
               x = hpf.process(x)
               x = a2dpLpf.process(x)
-              x = if (gateBypass) x * 0.18 else gate.process(x)
+              x = if (gateBypass) x * 0.65 else gate.process(x)
               x = afs.process(x)
             }
 
@@ -1019,7 +1059,7 @@ class MainActivity : FlutterActivity() {
             lastGuardLogTs = nowLog
             Log.w(
               TAG,
-              "A2DP guard rms=${"%.3f".format(rmsNow)} raw=${"%.3f".format(rawRms)} guard=${"%.3f".format(guardGain)} monitor=${"%.3f".format(monitorGain)} gCap=${"%.2f".format(g)} notchCount=${afs.activeCount()} duck=$duckNow"
+              "A2DP guard rms=${"%.3f".format(rmsNow)} raw=${"%.3f".format(rawRms)} guard=${"%.3f".format(guardGain)} monitor=${"%.3f".format(monitorGain)} gain=${"%.2f".format(g)} notchCount=${afs.activeCount()} duck=$duckNow"
             )
           }
         }
