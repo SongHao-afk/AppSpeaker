@@ -5,7 +5,7 @@
 
 	<!-- ====== MICROPHONE PERMISSION ====== -->
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Ứng dụng cần truy cập micro để xử lý âm thanh thời gian thực (karaoke / loopback).</string>
+	<string>The app requires microphone access for real-time audio processing (karaoke/loopback).</string>
 
 	<!-- ====== BACKGROUND AUDIO (ANDROID FOREGROUND SERVICE TƯƠNG ĐƯƠNG) ====== -->
 	<key>UIBackgroundModes</key>

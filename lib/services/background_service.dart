@@ -1,4 +1,3 @@
-
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 /// Class quản lý foreground service để app chạy nền
@@ -28,13 +27,17 @@ class BackgroundService {
   }
 
   /// Bắt đầu foreground service
-  static Future<void> start() async {
+  static Future<void> start({
+    required String notificationTitle,
+    required String notificationText,
+    required String stopButtonText,
+  }) async {
     await FlutterForegroundTask.startService(
-      notificationTitle: '🎤 Mic Loopback đang chạy',
-      notificationText: 'Âm thanh đang được truyền...',
+      notificationTitle: notificationTitle,
+      notificationText: notificationText,
       notificationIcon: null,
       notificationButtons: [
-        const NotificationButton(id: 'stop', text: 'Dừng'),
+        NotificationButton(id: 'stop', text: stopButtonText),
       ],
       callback: null, // Native handles audio, không cần callback
     );

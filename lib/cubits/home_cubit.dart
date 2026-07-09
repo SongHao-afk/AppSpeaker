@@ -96,7 +96,7 @@ class HomeCubit extends Cubit<HomeState> {
       state.lowMidGain,
       state.midGain,
       state.highMidGain,
-      state.trebleGain
+      state.trebleGain,
     ],
   );
 
@@ -113,7 +113,11 @@ class HomeCubit extends Cubit<HomeState> {
     });
   }
 
-  Future<void> start() async {
+  Future<void> start({
+    required String notificationTitle,
+    required String notificationText,
+    required String notificationStopButton,
+  }) async {
     if (state.starting || state.running) return;
     emit(state.copyWith(starting: true));
 
@@ -141,7 +145,11 @@ class HomeCubit extends Cubit<HomeState> {
       } catch (_) {}
 
       // Start foreground service (Android cần; iOS gọi cũng không sao)
-      await BackgroundService.start();
+      await BackgroundService.start(
+        notificationTitle: notificationTitle,
+        notificationText: notificationText,
+        stopButtonText: notificationStopButton,
+      );
 
       // ✅ iOS sẽ popup xin mic ở native nếu đang undetermined
       await Loopback.start(voiceMode: state.voiceMode);
@@ -173,14 +181,16 @@ class HomeCubit extends Cubit<HomeState> {
 
   void applyPreset(String name) {
     final v = presets[name]!;
-    emit(state.copyWith(
-      currentPreset: name,
-      bassGain: v[0],
-      lowMidGain: v[1],
-      midGain: v[2],
-      highMidGain: v[3],
-      trebleGain: v[4],
-    ));
+    emit(
+      state.copyWith(
+        currentPreset: name,
+        bassGain: v[0],
+        lowMidGain: v[1],
+        midGain: v[2],
+        highMidGain: v[3],
+        trebleGain: v[4],
+      ),
+    );
     _pushParamsDebounced();
   }
 
@@ -191,20 +201,14 @@ class HomeCubit extends Cubit<HomeState> {
   void setPreferWiredMic(bool value) async {
     emit(state.copyWith(preferWiredMic: value));
     try {
-      await Loopback.setPreferWiredMic(
-        value,
-        headsetBoost: state.headsetBoost,
-      );
+      await Loopback.setPreferWiredMic(value, headsetBoost: state.headsetBoost);
     } catch (_) {}
   }
 
   void setHeadsetBoost(double value) async {
     emit(state.copyWith(headsetBoost: value));
     try {
-      await Loopback.setPreferWiredMic(
-        true,
-        headsetBoost: value,
-      );
+      await Loopback.setPreferWiredMic(true, headsetBoost: value);
     } catch (_) {}
   }
 
