@@ -21,12 +21,18 @@ class HomeCubit extends Cubit<HomeState> {
   Timer? _paramDebounce;
   Timer? _wiredPoll;
   Timer? _btPoll;
+  _AppLifecycleObserver? _lifecycleObserver;
+  bool _initialized = false;
 
   HomeCubit() : super(const HomeState());
 
   void initialize() {
+    if (_initialized) return;
+    _initialized = true;
+
     // observe app lifecycle for iOS background audio
-    WidgetsBinding.instance.addObserver(_AppLifecycleObserver(this));
+    _lifecycleObserver = _AppLifecycleObserver(this);
+    WidgetsBinding.instance.addObserver(_lifecycleObserver!);
 
     FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
 
@@ -253,6 +259,10 @@ class HomeCubit extends Cubit<HomeState> {
     _btPoll?.cancel();
     _paramDebounce?.cancel();
     state.rmsSub?.cancel();
+    if (_lifecycleObserver != null) {
+      WidgetsBinding.instance.removeObserver(_lifecycleObserver!);
+      _lifecycleObserver = null;
+    }
     FlutterForegroundTask.removeTaskDataCallback(_onReceiveTaskData);
 
     if (state.running) {
