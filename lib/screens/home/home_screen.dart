@@ -298,7 +298,6 @@ class _HomepageState extends State<Homepage>
   @override
   void dispose() {
     _pulseController.dispose();
-    _homeCubit.close();
     super.dispose();
   }
 
