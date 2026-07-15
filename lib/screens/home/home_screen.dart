@@ -425,6 +425,7 @@ class _HomepageState extends State<Homepage>
 
   void _openLanguageSheet() {
     Locale pendingLocale = widget.locale;
+    final languageScrollController = ScrollController();
 
     showModalBottomSheet<void>(
       context: context,
@@ -450,33 +451,39 @@ class _HomepageState extends State<Homepage>
                     ),
                     const SizedBox(height: 16),
                     Expanded(
-                      child: GridView.builder(
-                        itemCount: _LanguageOption.all.length,
-                        gridDelegate:
-                            const SliverGridDelegateWithFixedCrossAxisCount(
-                              crossAxisCount: 2,
-                              mainAxisSpacing: 10,
-                              crossAxisSpacing: 12,
-                              childAspectRatio: 2.35,
-                            ),
-                        itemBuilder: (context, index) {
-                          final option = _LanguageOption.all[index];
-                          final selected = _sameLocale(
-                            pendingLocale,
-                            option.locale,
-                          );
+                      child: Scrollbar(
+                        controller: languageScrollController,
+                        thumbVisibility: true,
+                        child: GridView.builder(
+                          controller: languageScrollController,
+                          padding: const EdgeInsets.only(right: 4, bottom: 4),
+                          itemCount: _LanguageOption.all.length,
+                          gridDelegate:
+                              const SliverGridDelegateWithFixedCrossAxisCount(
+                                crossAxisCount: 2,
+                                mainAxisSpacing: 10,
+                                crossAxisSpacing: 12,
+                                childAspectRatio: 1.7,
+                              ),
+                          itemBuilder: (context, index) {
+                            final option = _LanguageOption.all[index];
+                            final selected = _sameLocale(
+                              pendingLocale,
+                              option.locale,
+                            );
 
-                          return _languageOptionCard(
-                            option: option,
-                            selected: selected,
-                            l10n: l10n,
-                            onTap: () {
-                              sheetSetState(() {
-                                pendingLocale = option.locale;
-                              });
-                            },
-                          );
-                        },
+                            return _languageOptionCard(
+                              option: option,
+                              selected: selected,
+                              l10n: l10n,
+                              onTap: () {
+                                sheetSetState(() {
+                                  pendingLocale = option.locale;
+                                });
+                              },
+                            );
+                          },
+                        ),
                       ),
                     ),
                     const SizedBox(height: 14),
@@ -511,7 +518,7 @@ class _HomepageState extends State<Homepage>
           },
         );
       },
-    );
+    ).whenComplete(languageScrollController.dispose);
   }
 
   Widget _bottomSheetFrame({
@@ -778,7 +785,7 @@ class _HomepageState extends State<Homepage>
         onTap: onTap,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 160),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(14),
             border: Border.all(
@@ -789,35 +796,41 @@ class _HomepageState extends State<Homepage>
             ),
           ),
           child: Stack(
+            fit: StackFit.expand,
             children: [
-              Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      _languageNativeName(option, l10n),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: theme.ink,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w800,
+              Padding(
+                padding: EdgeInsets.only(right: selected ? 14 : 0),
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        _languageNativeName(option, l10n),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: theme.ink,
+                          fontSize: 14,
+                          height: 1.05,
+                          fontWeight: FontWeight.w800,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      _languageLocalName(option, l10n),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: theme.muted,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
+                      const SizedBox(height: 2),
+                      Text(
+                        _languageLocalName(option, l10n),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: theme.muted,
+                          fontSize: 10,
+                          height: 1.05,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
               if (selected)
@@ -827,7 +840,7 @@ class _HomepageState extends State<Homepage>
                   child: Icon(
                     Icons.check_circle_rounded,
                     color: theme.danger,
-                    size: 20,
+                    size: 18,
                   ),
                 ),
             ],
@@ -988,33 +1001,40 @@ class _HomepageState extends State<Homepage>
               );
             },
             child: SafeArea(
-              child: Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 430),
-                  child: SingleChildScrollView(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  return SingleChildScrollView(
                     padding: const EdgeInsets.fromLTRB(18, 18, 18, 28),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        _Header(
-                          theme: theme,
-                          title: l10n.appTitle,
-                          onSettingsTap: _openSettings,
+                    child: Center(
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxWidth: 430,
+                          minHeight: math.max(0, constraints.maxHeight - 46),
                         ),
-                        const SizedBox(height: 18),
-                        _heroPanel(state, cubit),
-                        const SizedBox(height: 16),
-                        _modeSelector(state, cubit),
-                        const SizedBox(height: 18),
-                        _equalizerPanel(state, cubit),
-                        if (state.running) ...[
-                          const SizedBox(height: 14),
-                          _runningNotice(),
-                        ],
-                      ],
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            _Header(
+                              theme: theme,
+                              title: l10n.appTitle,
+                              onSettingsTap: _openSettings,
+                            ),
+                            const SizedBox(height: 18),
+                            _heroPanel(state, cubit),
+                            const SizedBox(height: 16),
+                            _modeSelector(state, cubit),
+                            const SizedBox(height: 18),
+                            _equalizerPanel(state, cubit),
+                            if (state.running) ...[
+                              const SizedBox(height: 14),
+                              _runningNotice(),
+                            ],
+                          ],
+                        ),
+                      ),
                     ),
-                  ),
-                ),
+                  );
+                },
               ),
             ),
           ),
@@ -1365,28 +1385,24 @@ class _HomepageState extends State<Homepage>
           ),
         ],
       ),
-      child: Row(
+      child: Column(
         children: [
-          Expanded(
-            child: _controlDeckButton(
-              icon: Icons.record_voice_over_rounded,
-              label: l10n.voiceMode,
-              selected: state.voiceMode,
-              colorA: theme.primary,
-              colorB: theme.secondary,
-              onTap: () => cubit.setVoiceMode(!state.voiceMode),
-            ),
+          _controlDeckButton(
+            icon: Icons.record_voice_over_rounded,
+            label: l10n.voiceMode,
+            selected: state.voiceMode,
+            colorA: theme.primary,
+            colorB: theme.secondary,
+            onTap: () => cubit.setVoiceMode(!state.voiceMode),
           ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: _controlDeckButton(
-              icon: Icons.headset_mic_rounded,
-              label: l10n.headsetMic,
-              selected: state.preferWiredMic,
-              colorA: theme.accent,
-              colorB: theme.success,
-              onTap: () => cubit.setPreferWiredMic(!state.preferWiredMic),
-            ),
+          const SizedBox(height: 8),
+          _controlDeckButton(
+            icon: Icons.headset_mic_rounded,
+            label: l10n.headsetMic,
+            selected: state.preferWiredMic,
+            colorA: theme.accent,
+            colorB: theme.success,
+            onTap: () => cubit.setPreferWiredMic(!state.preferWiredMic),
           ),
         ],
       ),
@@ -1635,45 +1651,56 @@ class _HomepageState extends State<Homepage>
               borderRadius: BorderRadius.circular(18),
               border: Border.all(color: theme.ink.withValues(alpha: 0.06)),
             ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                _band(
-                  '60Hz',
-                  state.bassGain,
-                  theme.visualizerColors[0],
-                  (v) => cubit.setBassGain(v),
-                  enabled: state.eqEnabled,
-                ),
-                _band(
-                  '230Hz',
-                  state.lowMidGain,
-                  theme.visualizerColors[2],
-                  (v) => cubit.setLowMidGain(v),
-                  enabled: state.eqEnabled,
-                ),
-                _band(
-                  '910Hz',
-                  state.midGain,
-                  theme.visualizerColors[3],
-                  (v) => cubit.setMidGain(v),
-                  enabled: state.eqEnabled,
-                ),
-                _band(
-                  '3.6kHz',
-                  state.highMidGain,
-                  theme.visualizerColors[4],
-                  (v) => cubit.setHighMidGain(v),
-                  enabled: state.eqEnabled,
-                ),
-                _band(
-                  '14kHz',
-                  state.trebleGain,
-                  theme.visualizerColors[6],
-                  (v) => cubit.setTrebleGain(v),
-                  enabled: state.eqEnabled,
-                ),
-              ],
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                return SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(minWidth: constraints.maxWidth),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        _band(
+                          '60Hz',
+                          state.bassGain,
+                          theme.visualizerColors[0],
+                          (v) => cubit.setBassGain(v),
+                          enabled: state.eqEnabled,
+                        ),
+                        _band(
+                          '230Hz',
+                          state.lowMidGain,
+                          theme.visualizerColors[2],
+                          (v) => cubit.setLowMidGain(v),
+                          enabled: state.eqEnabled,
+                        ),
+                        _band(
+                          '910Hz',
+                          state.midGain,
+                          theme.visualizerColors[3],
+                          (v) => cubit.setMidGain(v),
+                          enabled: state.eqEnabled,
+                        ),
+                        _band(
+                          '3.6kHz',
+                          state.highMidGain,
+                          theme.visualizerColors[4],
+                          (v) => cubit.setHighMidGain(v),
+                          enabled: state.eqEnabled,
+                        ),
+                        _band(
+                          '14kHz',
+                          state.trebleGain,
+                          theme.visualizerColors[6],
+                          (v) => cubit.setTrebleGain(v),
+                          enabled: state.eqEnabled,
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
             ),
           ),
         ],
